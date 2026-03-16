@@ -12,6 +12,8 @@ from matplotlib.gridspec import GridSpec
 import numpy as np
 import xarray as xr
 
+from low_rank_approx import LowRankApprox
+
 
 def plot_summary(ds: xr.Dataset, times: list[float]):
     t = ds["time"].values
@@ -20,8 +22,18 @@ def plot_summary(ds: xr.Dataset, times: list[float]):
 
     selected_indices = [int(np.argmin(np.abs(t - t_plot))) for t_plot in times]
     selected_times = t[selected_indices]
-    selected_f = ds["f"].values[selected_indices]
 
+    selected_f = []
+    for idx in selected_indices:
+        f_lra = LowRankApprox(nx=x.size, nv=v.size, nr=ds["rank"].size)
+        f_lra.init_from_tensors(
+            X=ds["X"].values[idx],
+            S=ds["S"].values[idx],
+            V=ds["V"].values[idx],
+        )
+        selected_f.append(f_lra.to_full())
+
+    selected_f = np.asarray(selected_f)
     vmin = float(np.min(selected_f))
     vmax = float(np.max(selected_f))
 
@@ -42,7 +54,7 @@ def plot_summary(ds: xr.Dataset, times: list[float]):
 
     pcm = None
     for i, (idx, t_snap, ax_f, ax_phi) in enumerate(zip(selected_indices, selected_times, phase_axes, phi_axes)):
-        pcm = ax_f.pcolormesh(x, v, ds["f"].values[idx].T, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        pcm = ax_f.pcolormesh(x, v, selected_f[i].T, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
         ax_f.set_title(f"t = {t_snap:.1f}")
         if i == 0:
             ax_f.set_ylabel("v")
