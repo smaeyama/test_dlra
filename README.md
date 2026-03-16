@@ -4,10 +4,9 @@ Dynamic Low-Rank Approximation (DLRA) test project for 1D electrostatic Vlasov�
 
 ## Files
 
-- `test_dlra_implementation_v03.py` — split workflow script
-  - (i) initial value generation
-  - (ii) DLRA simulation
-  - (iii) visualization
+- `stage1_create_initial.py` — (i) initial value generation and NetCDF output
+- `stage2_simulate_dlra.py` — (ii) DLRA simulation from initial NetCDF
+- `stage3_visualize_results.py` — (iii) visualization from simulation NetCDF
 - `test_dlra_implementation_v03.ipynb` — notebook version.
 - `requirements.txt` — Python dependencies.
 
@@ -22,24 +21,24 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Usage (3-stage workflow with NetCDF handoff)
+## Usage (3 Python files + NetCDF handoff)
 
 ### (i) 初期値作成
 
 ```bash
-python test_dlra_implementation_v03.py create-initial --out initial_state.nc --flag-init two-stream
+python stage1_create_initial.py --out initial_state.nc --flag-init two-stream
 ```
 
 ### (ii) 動的低ランク近似シミュレーション
 
 ```bash
-python test_dlra_implementation_v03.py simulate --initial initial_state.nc --out simulation_result.nc --rank 64 --dt 0.025 --nt 1000 --nskip 20
+python stage2_simulate_dlra.py --initial initial_state.nc --out simulation_result.nc --rank 64 --dt 0.025 --nt 1000 --nskip 20
 ```
 
 ### (iii) 結果可視化
 
 ```bash
-python test_dlra_implementation_v03.py visualize --sim simulation_result.nc
+python stage3_visualize_results.py --sim simulation_result.nc
 ```
 
 各ステージ間のデータ受け渡しは `xarray` を使った NetCDF (`.nc`) です。
