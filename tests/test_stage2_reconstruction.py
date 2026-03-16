@@ -80,6 +80,10 @@ def test_stage2_low_rank_reconstructs_initial_fields() -> None:
             f"{name} relative L2 error {values['relative_l2']:.6e} exceeds threshold {REL_L2_THRESHOLD}. "
             f"RMS={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
         )
+        print(
+            f"passed: {name} rel_l2={values['relative_l2']:.6e}, "
+            f"rms={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
+        )
 
 
 def test_dlra_orthogonality() -> None:
@@ -98,5 +102,15 @@ def test_dlra_orthogonality() -> None:
     x_gram = X.T @ X * dx
     v_gram = V.T @ V * dv
 
-    assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), "X basis is not orthonormal under dx inner product."
-    assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), "V basis is not orthonormal under dv inner product."
+    x_max_dev = float(np.max(np.abs(x_gram - np.eye(X.shape[1]))))
+    v_max_dev = float(np.max(np.abs(v_gram - np.eye(V.shape[1]))))
+
+    assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), (
+        f"X basis is not orthonormal under dx inner product. max_dev={x_max_dev:.6e}"
+    )
+    assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), (
+        f"V basis is not orthonormal under dv inner product. max_dev={v_max_dev:.6e}"
+    )
+
+    print(f"passed: X orthogonality max_dev={x_max_dev:.6e} (weighted by dx)")
+    print(f"passed: V orthogonality max_dev={v_max_dev:.6e} (weighted by dv)")
