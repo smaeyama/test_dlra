@@ -91,10 +91,58 @@ def solve_poisson_full(f_vx: np.ndarray, grid: Grid):
     return rho, phi, efield
 
 
+def time_advance_in_x(f_vx: np.ndarray, dt: float, grid: Grid):
+    kx = fftfreq(grid.nx, d=grid.dx) * 2 * np.pi
+    f_hat = fft(f_vx, axis=1)
+    phase = np.exp(-1j * kx[None, :] * grid.v[:, None] * dt)
+    f_new = np.real(ifft(f_hat * phase, axis=1))
+    rho, phi, efield = solve_poisson_full(f_new, grid)
+    return f_new, rho, phi, efield
+
+
+def time_advance_in_v(f_vx: np.ndarray, efield: np.ndarray, dt: float, grid: Grid):
+    kv = fftfreq(grid.nv, d=grid.dv) * 2 * np.pi
+    f_hat = fft(f_vx, axis=0)
+    phase = np.exp(1j * kv[:, None] * efield[None, :] * dt)
+    return np.real(ifft(f_hat * phase, axis=0))
+
+
+def run_reference_simulation(f_init_vx: np.ndarray, grid: Grid, dt: float, nt: int, nskip: int):
+    nsave = (nt - 1) // nskip + 1
+    t_all = np.zeros(nsave)
+    f_all = np.zeros((nsave, grid.nv, grid.nx))
+    rho_all = np.zeros((nsave, grid.nx))
+    phi_all = np.zeros((nsave, grid.nx))
+    e_all = np.zeros((nsave, grid.nx))
+
+    f = f_init_vx.copy()
+    rho, phi, efield = solve_poisson_full(f, grid)
+    t = 0.0
+
+    for i_save in range(nsave):
+        t_all[i_save] = t
+        f_all[i_save] = f
+        rho_all[i_save] = rho
+        phi_all[i_save] = phi
+        e_all[i_save] = efield
+
+        for _ in range(nskip):
+            f, rho, phi, efield = time_advance_in_x(f, dt / 2.0, grid)
+            f = time_advance_in_v(f, efield, dt, grid)
+            f, rho, phi, efield = time_advance_in_x(f, dt / 2.0, grid)
+            t += dt
+
+    return t_all, f_all, rho_all, phi_all, e_all
+
+
 def main():
     parser = argparse.ArgumentParser(description="Stage (i): create initial NetCDF")
     parser.add_argument("--out", default="initial_state.nc")
+    parser.add_argument("--reference-out", default="reference_result.nc")
     parser.add_argument("--flag-init", default="two-stream")
+    parser.add_argument("--dt", type=float, default=0.25)
+    parser.add_argument("--nt", type=int, default=1000)
+    parser.add_argument("--nskip", type=int, default=20)
     args = parser.parse_args()
 
     f_vx, grid = build_initial_distribution(flag_init=args.flag_init)
@@ -112,6 +160,37 @@ def main():
     )
     ds.to_netcdf(args.out)
     print(f"[stage i] wrote initial dataset: {args.out}")
+
+    t_all, f_all, rho_all, phi_all, e_all = run_reference_simulation(
+        f_init_vx=f_vx,
+        grid=grid,
+        dt=args.dt,
+        nt=args.nt,
+        nskip=args.nskip,
+    )
+    kinetic = 0.5 * np.sum(f_all * (grid.v[:, None] ** 2)[None, :, :], axis=(1, 2)) * grid.dx * grid.dv
+    field = 0.5 * np.sum(e_all**2, axis=1) * grid.dx
+    ds_ref = xr.Dataset(
+        data_vars={
+            "f": (("time", "x", "v"), np.transpose(f_all, (0, 2, 1))),
+            "rho": (("time", "x"), rho_all),
+            "phi": (("time", "x"), phi_all),
+            "E": (("time", "x"), e_all),
+            "kinetic_energy": (("time",), kinetic),
+            "field_energy": (("time",), field),
+            "total_energy": (("time",), kinetic + field),
+        },
+        coords={"time": t_all, "x": grid.x, "v": grid.v},
+        attrs={
+            "dt": args.dt,
+            "nt": args.nt,
+            "nskip": args.nskip,
+            "flag_init": args.flag_init,
+            "source_initial_file": args.out,
+        },
+    )
+    ds_ref.to_netcdf(args.reference_out)
+    print(f"[stage i] wrote reference simulation dataset: {args.reference_out}")
 
 
 if __name__ == "__main__":
