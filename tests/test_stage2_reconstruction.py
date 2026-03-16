@@ -43,18 +43,32 @@ def _time_slice(arr: xr.DataArray, target_time: float) -> tuple[xr.DataArray, fl
     return arr.isel(time=idx), float(time_values[idx])
 
 
+def _shared_time_value(ds_reference: xr.Dataset, ds_sim: xr.Dataset, target_time: float) -> tuple[float, float, float]:
+    ref_times = _read_first_available(ds_reference, ("f", "f_ref"))["time"].values.astype(float)
+    sim_times = ds_sim["X"]["time"].values.astype(float)
+
+    ref_idx = int(np.argmin(np.abs(ref_times - target_time)))
+    shared_time = float(ref_times[ref_idx])
+    sim_idx = int(np.argmin(np.abs(sim_times - shared_time)))
+    sim_time = float(sim_times[sim_idx])
+
+    return shared_time, sim_time, abs(shared_time - sim_time)
+
+
 def _compare_reference_and_simulation_at_time(
     ds_reference: xr.Dataset, ds_sim: xr.Dataset, target_time: float
 ) -> dict[str, dict[str, float]]:
-    f_ref_da, actual_time = _time_slice(_read_first_available(ds_reference, ("f", "f_ref")), target_time)
-    rho_ref_da, _ = _time_slice(_read_first_available(ds_reference, ("rho", "rho_ref")), target_time)
-    phi_ref_da, _ = _time_slice(_read_first_available(ds_reference, ("phi", "phi_ref")), target_time)
+    shared_time, sim_time, time_gap = _shared_time_value(ds_reference, ds_sim, target_time)
 
-    X_da, _ = _time_slice(ds_sim["X"], target_time)
-    S_da, _ = _time_slice(ds_sim["S"], target_time)
-    V_da, _ = _time_slice(ds_sim["V"], target_time)
-    rho_lr_da, _ = _time_slice(ds_sim["rho"], target_time)
-    phi_lr_da, _ = _time_slice(ds_sim["phi"], target_time)
+    f_ref_da, actual_time = _time_slice(_read_first_available(ds_reference, ("f", "f_ref")), shared_time)
+    rho_ref_da, _ = _time_slice(_read_first_available(ds_reference, ("rho", "rho_ref")), shared_time)
+    phi_ref_da, _ = _time_slice(_read_first_available(ds_reference, ("phi", "phi_ref")), shared_time)
+
+    X_da, _ = _time_slice(ds_sim["X"], shared_time)
+    S_da, _ = _time_slice(ds_sim["S"], shared_time)
+    V_da, _ = _time_slice(ds_sim["V"], shared_time)
+    rho_lr_da, _ = _time_slice(ds_sim["rho"], shared_time)
+    phi_lr_da, _ = _time_slice(ds_sim["phi"], shared_time)
 
     f_ref = f_ref_da.values
     rho_ref = rho_ref_da.values
@@ -89,7 +103,10 @@ def _compare_reference_and_simulation_at_time(
 
     time_label = f"target_time={target_time:g}"
     if actual_time is not None:
-        time_label += f" (selected_time={actual_time:g})"
+        time_label += (
+            f" (selected_ref_time={actual_time:g}, selected_sim_time={sim_time:g}, "
+            f"|Δt|={time_gap:.3e})"
+        )
 
     for name, values in metrics.items():
         assert values["relative_l2"] <= REL_L2_THRESHOLD, (
