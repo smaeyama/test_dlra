@@ -6,9 +6,10 @@ import numpy as np
 import xarray as xr
 
 
-INITIAL_FILE = Path("initial_state.nc")
+REFERENCE_FILE = Path("reference_result.nc")
 SIM_FILE = Path("simulation_result.nc")
 REL_L2_THRESHOLD = 0.1
+TIME_POINTS = (0.0, 10.0)
 
 
 def _read_first_available(ds: xr.Dataset, names: tuple[str, ...]) -> xr.DataArray:
@@ -33,26 +34,37 @@ def _max_abs(reference: np.ndarray, test: np.ndarray) -> float:
     return float(np.max(np.abs(reference - test)))
 
 
-def _first_time_slice(arr: xr.DataArray) -> xr.DataArray:
-    return arr.isel(time=0) if "time" in arr.dims else arr
+def _time_slice(arr: xr.DataArray, target_time: float) -> tuple[xr.DataArray, float | None]:
+    if "time" not in arr.dims:
+        return arr, None
+
+    time_values = arr["time"].values.astype(float)
+    idx = int(np.argmin(np.abs(time_values - target_time)))
+    return arr.isel(time=idx), float(time_values[idx])
 
 
-def test_stage2_low_rank_reconstructs_initial_fields() -> None:
-    assert INITIAL_FILE.exists(), f"Missing required dataset: {INITIAL_FILE}"
-    assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
+def _compare_reference_and_simulation_at_time(
+    ds_reference: xr.Dataset, ds_sim: xr.Dataset, target_time: float
+) -> dict[str, dict[str, float]]:
+    f_ref_da, actual_time = _time_slice(_read_first_available(ds_reference, ("f", "f_ref")), target_time)
+    rho_ref_da, _ = _time_slice(_read_first_available(ds_reference, ("rho", "rho_ref")), target_time)
+    phi_ref_da, _ = _time_slice(_read_first_available(ds_reference, ("phi", "phi_ref")), target_time)
 
-    ds_initial = xr.load_dataset(INITIAL_FILE)
-    ds_sim = xr.load_dataset(SIM_FILE)
+    X_da, _ = _time_slice(ds_sim["X"], target_time)
+    S_da, _ = _time_slice(ds_sim["S"], target_time)
+    V_da, _ = _time_slice(ds_sim["V"], target_time)
+    rho_lr_da, _ = _time_slice(ds_sim["rho"], target_time)
+    phi_lr_da, _ = _time_slice(ds_sim["phi"], target_time)
 
-    f_ref = _read_first_available(ds_initial, ("f", "f_init")).values
-    rho_ref = _read_first_available(ds_initial, ("rho", "rho_init")).values
-    phi_ref = _read_first_available(ds_initial, ("phi", "phi_init")).values
+    f_ref = f_ref_da.values
+    rho_ref = rho_ref_da.values
+    phi_ref = phi_ref_da.values
 
-    X = _first_time_slice(ds_sim["X"]).values
-    S = _first_time_slice(ds_sim["S"]).values
-    V = _first_time_slice(ds_sim["V"]).values
-    rho_lr = _first_time_slice(ds_sim["rho"]).values
-    phi_lr = _first_time_slice(ds_sim["phi"]).values
+    X = X_da.values
+    S = S_da.values
+    V = V_da.values
+    rho_lr = rho_lr_da.values
+    phi_lr = phi_lr_da.values
 
     # Supports both legacy S(rank, rank) and renamed S(rankx, rankv) conventions.
     f_lr = X @ S @ V.T
@@ -75,15 +87,33 @@ def test_stage2_low_rank_reconstructs_initial_fields() -> None:
         },
     }
 
+    time_label = f"target_time={target_time:g}"
+    if actual_time is not None:
+        time_label += f" (selected_time={actual_time:g})"
+
     for name, values in metrics.items():
         assert values["relative_l2"] <= REL_L2_THRESHOLD, (
-            f"{name} relative L2 error {values['relative_l2']:.6e} exceeds threshold {REL_L2_THRESHOLD}. "
-            f"RMS={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
+            f"{name} relative L2 error {values['relative_l2']:.6e} exceeds threshold {REL_L2_THRESHOLD} "
+            f"at {time_label}. RMS={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
         )
-        print(
-            f"passed: {name} rel_l2={values['relative_l2']:.6e}, "
-            f"rms={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
-        )
+
+    return metrics
+
+
+def test_stage2_low_rank_reconstructs_reference_fields_multiple_times() -> None:
+    assert REFERENCE_FILE.exists(), f"Missing required dataset: {REFERENCE_FILE}"
+    assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
+
+    ds_reference = xr.load_dataset(REFERENCE_FILE)
+    ds_sim = xr.load_dataset(SIM_FILE)
+
+    for target_time in TIME_POINTS:
+        metrics = _compare_reference_and_simulation_at_time(ds_reference, ds_sim, target_time)
+        for name, values in metrics.items():
+            print(
+                f"passed: time={target_time:g}, {name} rel_l2={values['relative_l2']:.6e}, "
+                f"rms={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
+            )
 
 
 def test_dlra_orthogonality() -> None:
@@ -91,8 +121,8 @@ def test_dlra_orthogonality() -> None:
 
     ds_sim = xr.load_dataset(SIM_FILE)
 
-    X = _first_time_slice(ds_sim["X"]).values
-    V = _first_time_slice(ds_sim["V"]).values
+    X = _time_slice(ds_sim["X"], 0.0)[0].values
+    V = _time_slice(ds_sim["V"], 0.0)[0].values
 
     x_coords = ds_sim["x"].values
     v_coords = ds_sim["v"].values
