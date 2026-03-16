@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import pytest
 import xarray as xr
 
 
@@ -34,9 +33,13 @@ def _max_abs(reference: np.ndarray, test: np.ndarray) -> float:
     return float(np.max(np.abs(reference - test)))
 
 
+def _first_time_slice(arr: xr.DataArray) -> xr.DataArray:
+    return arr.isel(time=0) if "time" in arr.dims else arr
+
+
 def test_stage2_low_rank_reconstructs_initial_fields() -> None:
-    if not INITIAL_FILE.exists() or not SIM_FILE.exists():
-        pytest.skip("Requires existing 'initial_state.nc' and 'simulation_result.nc' in repo root.")
+    assert INITIAL_FILE.exists(), f"Missing required dataset: {INITIAL_FILE}"
+    assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
 
     ds_initial = xr.load_dataset(INITIAL_FILE)
     ds_sim = xr.load_dataset(SIM_FILE)
@@ -45,12 +48,13 @@ def test_stage2_low_rank_reconstructs_initial_fields() -> None:
     rho_ref = _read_first_available(ds_initial, ("rho", "rho_init")).values
     phi_ref = _read_first_available(ds_initial, ("phi", "phi_init")).values
 
-    X = ds_sim["X"].isel(time=0).values
-    S = ds_sim["S"].isel(time=0).values
-    V = ds_sim["V"].isel(time=0).values
-    rho_lr = ds_sim["rho"].isel(time=0).values
-    phi_lr = ds_sim["phi"].isel(time=0).values
+    X = _first_time_slice(ds_sim["X"]).values
+    S = _first_time_slice(ds_sim["S"]).values
+    V = _first_time_slice(ds_sim["V"]).values
+    rho_lr = _first_time_slice(ds_sim["rho"]).values
+    phi_lr = _first_time_slice(ds_sim["phi"]).values
 
+    # Supports both legacy S(rank, rank) and renamed S(rankx, rankv) conventions.
     f_lr = X @ S @ V.T
 
     metrics = {
@@ -71,9 +75,23 @@ def test_stage2_low_rank_reconstructs_initial_fields() -> None:
         },
     }
 
-    for name in ("f", "rho", "phi"):
-        rel_l2 = metrics[name]["relative_l2"]
-        assert rel_l2 <= REL_L2_THRESHOLD, (
-            f"{name} relative L2 error {rel_l2:.6e} exceeds threshold {REL_L2_THRESHOLD}. "
-            f"RMS={metrics[name]['rms']:.6e}, max_abs={metrics[name]['max_abs']:.6e}"
+    for name, values in metrics.items():
+        assert values["relative_l2"] <= REL_L2_THRESHOLD, (
+            f"{name} relative L2 error {values['relative_l2']:.6e} exceeds threshold {REL_L2_THRESHOLD}. "
+            f"RMS={values['rms']:.6e}, max_abs={values['max_abs']:.6e}"
         )
+
+
+def test_dlra_orthogonality() -> None:
+    assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
+
+    ds_sim = xr.load_dataset(SIM_FILE)
+
+    X = _first_time_slice(ds_sim["X"]).values
+    V = _first_time_slice(ds_sim["V"]).values
+
+    x_gram = X.T @ X
+    v_gram = V.T @ V
+
+    assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), "X basis is not orthonormal."
+    assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), "V basis is not orthonormal."
