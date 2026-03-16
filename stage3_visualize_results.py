@@ -26,28 +26,37 @@ def plot_summary(ds: xr.Dataset, times: list[float]):
     vmax = float(np.max(selected_f))
 
     n_panels = len(times)
-    fig = plt.figure(figsize=(4 * n_panels + 2.5, 7), constrained_layout=True)
+    fig = plt.figure(figsize=(4 * n_panels + 2.5, 8), constrained_layout=True)
     gs = GridSpec(
-        nrows=2,
+        nrows=3,
         ncols=n_panels + 1,
         figure=fig,
-        height_ratios=[2.2, 1],
+        height_ratios=[2.0, 1.1, 1.4],
         width_ratios=[1] * n_panels + [0.06],
     )
 
     phase_axes = [fig.add_subplot(gs[0, i]) for i in range(n_panels)]
-    cbar_ax = fig.add_subplot(gs[0, n_panels])
-    energy_ax = fig.add_subplot(gs[1, :])
+    phi_axes = [fig.add_subplot(gs[1, i], sharex=phase_axes[i]) for i in range(n_panels)]
+    cbar_ax = fig.add_subplot(gs[:2, n_panels])
+    energy_ax = fig.add_subplot(gs[2, :])
 
     pcm = None
-    for i, (idx, t_snap, ax) in enumerate(zip(selected_indices, selected_times, phase_axes)):
-        pcm = ax.pcolormesh(x, v, ds["f"].values[idx].T, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
-        ax.set_title(f"t = {t_snap:.1f}")
-        ax.set_xlabel("x")
+    for i, (idx, t_snap, ax_f, ax_phi) in enumerate(zip(selected_indices, selected_times, phase_axes, phi_axes)):
+        pcm = ax_f.pcolormesh(x, v, ds["f"].values[idx].T, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        ax_f.set_title(f"t = {t_snap:.1f}")
         if i == 0:
-            ax.set_ylabel("v")
+            ax_f.set_ylabel("v")
         else:
-            ax.tick_params(labelleft=False)
+            ax_f.tick_params(labelleft=False)
+        ax_f.tick_params(labelbottom=False)
+
+        ax_phi.plot(x, ds["phi"].values[idx], "r")
+        ax_phi.set_xlabel("x")
+        if i == 0:
+            ax_phi.set_ylabel("phi(x)")
+        else:
+            ax_phi.tick_params(labelleft=False)
+        ax_phi.grid(True, alpha=0.3)
 
     if pcm is not None:
         fig.colorbar(pcm, cax=cbar_ax, label="f(x,v)")
