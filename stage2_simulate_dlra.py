@@ -168,9 +168,9 @@ def main():
 
     ds = xr.Dataset(
         data_vars={
-            "X": (("time", "x", "rank"), X_all),
-            "S": (("time", "rank", "rank"), S_all),
-            "V": (("time", "v", "rank"), V_all),
+            "X": (("time", "x", "rankx"), X_all),
+            "S": (("time", "rankx", "rankv"), S_all),
+            "V": (("time", "v", "rankv"), V_all),
             "rho": (("time", "x"), rho_all),
             "phi": (("time", "x"), phi_all),
             "E": (("time", "x"), e_all),
