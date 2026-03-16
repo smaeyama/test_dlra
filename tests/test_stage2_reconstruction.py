@@ -90,8 +90,13 @@ def test_dlra_orthogonality() -> None:
     X = _first_time_slice(ds_sim["X"]).values
     V = _first_time_slice(ds_sim["V"]).values
 
-    x_gram = X.T @ X
-    v_gram = V.T @ V
+    x_coords = ds_sim["x"].values
+    v_coords = ds_sim["v"].values
+    dx = float(x_coords[1] - x_coords[0])
+    dv = float(v_coords[1] - v_coords[0])
 
-    assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), "X basis is not orthonormal."
-    assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), "V basis is not orthonormal."
+    x_gram = X.T @ X * dx
+    v_gram = V.T @ V * dv
+
+    assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), "X basis is not orthonormal under dx inner product."
+    assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), "V basis is not orthonormal under dv inner product."
