@@ -12,25 +12,7 @@ import xarray as xr
 from scipy.fft import fft, fftfreq, ifft
 from tqdm import tqdm
 
-
-class LowRankApprox:
-    def __init__(self, nx: int, nv: int, nr: int):
-        self.nx = nx
-        self.nv = nv
-        self.nr = nr
-        self.X = np.zeros((nx, nr))
-        self.S = np.zeros((nr, nr))
-        self.V = np.zeros((nv, nr))
-
-    def init_from_full(self, f_xv: np.ndarray, dx: float, dv: float):
-        U, s, Vt = np.linalg.svd(f_xv, full_matrices=False)
-        r = min(self.nr, s.size)
-        self.X[:, :r] = U[:, :r] / np.sqrt(dx)
-        self.S[:r, :r] = np.sqrt(dx) * np.diag(s[:r]) * np.sqrt(dv)
-        self.V[:, :r] = Vt[:r, :].T / np.sqrt(dv)
-
-    def to_full(self):
-        return self.X @ self.S @ self.V.T
+from low_rank_approx import LowRankApprox
 
 
 def solve_poisson_lra(f_lra: LowRankApprox, dv: float, dx: float):
@@ -157,7 +139,9 @@ def main():
 
     nsave = (args.nt - 1) // args.nskip + 1
     t_all = np.zeros(nsave)
-    f_all = np.zeros((nsave, nx, nv))
+    X_all = np.zeros((nsave, nx, args.rank))
+    S_all = np.zeros((nsave, args.rank, args.rank))
+    V_all = np.zeros((nsave, nv, args.rank))
     rho_all = np.zeros((nsave, nx))
     phi_all = np.zeros((nsave, nx))
     e_all = np.zeros((nsave, nx))
@@ -166,7 +150,9 @@ def main():
     for i_save in tqdm(range(nsave), desc="DLRA"):
         rho, phi, efield = solve_poisson_lra(f_lra, dv=dv, dx=dx)
         t_all[i_save] = t
-        f_all[i_save] = f_lra.to_full()
+        X_all[i_save] = f_lra.X
+        S_all[i_save] = f_lra.S
+        V_all[i_save] = f_lra.V
         rho_all[i_save] = rho
         phi_all[i_save] = phi
         e_all[i_save] = efield
@@ -175,12 +161,16 @@ def main():
             f_lra, efield = step_split(f_lra, efield, args.dt, v, dx, dv)
             t += args.dt
 
-    kinetic = 0.5 * np.sum(f_all * (v[None, None, :] ** 2), axis=(1, 2)) * dx * dv
+    x_weight = np.sum(X_all, axis=1) * dx
+    v2_weight = (v**2) @ V_all * dv
+    kinetic = 0.5 * np.einsum("ti,tij,tj->t", x_weight, S_all, v2_weight)
     field = 0.5 * np.sum(e_all**2, axis=1) * dx
 
     ds = xr.Dataset(
         data_vars={
-            "f": (("time", "x", "v"), f_all),
+            "X": (("time", "x", "rank"), X_all),
+            "S": (("time", "rank", "rank"), S_all),
+            "V": (("time", "v", "rank"), V_all),
             "rho": (("time", "x"), rho_all),
             "phi": (("time", "x"), phi_all),
             "E": (("time", "x"), e_all),
@@ -188,7 +178,7 @@ def main():
             "field_energy": (("time",), field),
             "total_energy": (("time",), kinetic + field),
         },
-        coords={"time": t_all, "x": x, "v": v},
+        coords={"time": t_all, "x": x, "v": v, "rank": np.arange(args.rank)},
         attrs={
             "rank": args.rank,
             "dt": args.dt,
