@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import xarray as xr
-from scipy.fft import fft, fftfreq, ifft
 
 
 INITIAL_FILE = Path("initial_state.nc")
@@ -35,15 +34,6 @@ def _max_abs(reference: np.ndarray, test: np.ndarray) -> float:
     return float(np.max(np.abs(reference - test)))
 
 
-def _solve_poisson_from_rho(rho: np.ndarray, dx: float) -> np.ndarray:
-    nx = rho.shape[0]
-    kx = fftfreq(nx, d=dx) * 2 * np.pi
-    ksq_inv = np.divide(1.0, kx**2, out=np.zeros_like(kx), where=(kx != 0.0))
-    rho_k = fft(rho)
-    phi_k = rho_k * ksq_inv
-    return np.real(ifft(phi_k))
-
-
 def test_stage2_low_rank_reconstructs_initial_fields() -> None:
     if not INITIAL_FILE.exists() or not SIM_FILE.exists():
         pytest.skip("Requires existing 'initial_state.nc' and 'simulation_result.nc' in repo root.")
@@ -55,18 +45,13 @@ def test_stage2_low_rank_reconstructs_initial_fields() -> None:
     rho_ref = _read_first_available(ds_initial, ("rho", "rho_init")).values
     phi_ref = _read_first_available(ds_initial, ("phi", "phi_init")).values
 
-    x = ds_initial["x"].values
-    v = ds_initial["v"].values
-    dx = float(x[1] - x[0])
-    dv = float(v[1] - v[0])
-
     X = ds_sim["X"].isel(time=0).values
     S = ds_sim["S"].isel(time=0).values
     V = ds_sim["V"].isel(time=0).values
+    rho_lr = ds_sim["rho"].isel(time=0).values
+    phi_lr = ds_sim["phi"].isel(time=0).values
 
     f_lr = X @ S @ V.T
-    rho_lr = 1.0 - np.sum(f_lr, axis=1) * dv
-    phi_lr = _solve_poisson_from_rho(rho_lr, dx=dx)
 
     metrics = {
         "f": {
