@@ -9,7 +9,7 @@ import argparse
 
 import numpy as np
 import xarray as xr
-from scipy.fft import fft, fftfreq, ifft
+from numpy.fft import fft, fftfreq, ifft
 from tqdm import tqdm
 
 from low_rank_approx import LowRankApprox
@@ -31,10 +31,10 @@ def solve_poisson_lra(f_lra: LowRankApprox, dv: float, dx: float):
 
 def first_derivative_periodic(arr: np.ndarray, h: float, axis: int):
     return (
-        -np.roll(arr, 2, axis=axis)
-        + 8 * np.roll(arr, 1, axis=axis)
-        - 8 * np.roll(arr, -1, axis=axis)
-        + np.roll(arr, -2, axis=axis)
+        -np.roll(arr, -2, axis=axis)
+        + 8 * np.roll(arr, -1, axis=axis)
+        - 8 * np.roll(arr, 1, axis=axis)
+        + np.roll(arr, 2, axis=axis)
     ) / (12.0 * h)
 
 
@@ -65,10 +65,12 @@ def k_step_rk4(f_lra: LowRankApprox, efield: np.ndarray, dt: float, v: np.ndarra
 def s_step_rk4(f_lra: LowRankApprox, efield: np.ndarray, dt: float, v: np.ndarray, dx: float, dv: float):
     X, S, V = f_lra.X, f_lra.S, f_lra.V
     C1 = (V.T @ (v[:, None] * V)) * dv
-    VV = (V.T @ first_derivative_periodic(V, dv, axis=0)) * dv
+    dVdv = first_derivative_periodic(V, dv, axis=0)
+    VV = (V.T @ dVdv) * dv
     C2 = 0.5 * (VV - VV.T)
     D1 = (X.T @ (X * efield[:, None])) * dx
-    XX = (X.T @ first_derivative_periodic(X, dx, axis=0)) * dx
+    dXdx = first_derivative_periodic(X, dx, axis=0)
+    XX = (X.T @ dXdx) * dx
     D2 = 0.5 * (XX - XX.T)
 
     def rhs(Sm):
@@ -86,7 +88,8 @@ def l_step_rk4(f_lra: LowRankApprox, efield: np.ndarray, dt: float, v: np.ndarra
     X, S, V = f_lra.X, f_lra.S, f_lra.V
     L = V @ S.T
     D1 = (X.T @ (X * efield[:, None])) * dx
-    XX = (X.T @ first_derivative_periodic(X, dx, axis=0)) * dx
+    dXdx = first_derivative_periodic(X, dx, axis=0)
+    XX = (X.T @ dXdx) * dx
     D2 = 0.5 * (XX - XX.T)
 
     def rhs(Lm):

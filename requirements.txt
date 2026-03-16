@@ -1,7 +1,4 @@
 numpy
-scipy
 matplotlib
 tqdm
 xarray
-ipython
-jupyter

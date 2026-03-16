@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import xarray as xr
-from scipy.fft import fft, fftfreq, ifft
+from numpy.fft import fft, fftfreq, ifft
 
 
 @dataclass
