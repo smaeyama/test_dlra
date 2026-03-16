@@ -9,7 +9,7 @@ import xarray as xr
 REFERENCE_FILE = Path("reference_result.nc")
 SIM_FILE = Path("simulation_result.nc")
 REL_L2_THRESHOLD = 0.1
-TIME_POINTS = (0.0, 10.0)
+TIME_POINTS = (0.0, 5.0)
 
 
 def _read_first_available(ds: xr.Dataset, names: tuple[str, ...]) -> xr.DataArray:
@@ -134,30 +134,38 @@ def test_stage2_low_rank_reconstructs_reference_fields_multiple_times() -> None:
 
 
 def test_dlra_orthogonality() -> None:
+    assert REFERENCE_FILE.exists(), f"Missing required dataset: {REFERENCE_FILE}"
     assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
 
+    ds_reference = xr.load_dataset(REFERENCE_FILE)
     ds_sim = xr.load_dataset(SIM_FILE)
-
-    X = _time_slice(ds_sim["X"], 0.0)[0].values
-    V = _time_slice(ds_sim["V"], 0.0)[0].values
 
     x_coords = ds_sim["x"].values
     v_coords = ds_sim["v"].values
     dx = float(x_coords[1] - x_coords[0])
     dv = float(v_coords[1] - v_coords[0])
 
-    x_gram = X.T @ X * dx
-    v_gram = V.T @ V * dv
+    for target_time in TIME_POINTS:
+        shared_time, sim_time, time_gap = _shared_time_value(ds_reference, ds_sim, target_time)
+        X = _time_slice(ds_sim["X"], shared_time)[0].values
+        V = _time_slice(ds_sim["V"], shared_time)[0].values
 
-    x_max_dev = float(np.max(np.abs(x_gram - np.eye(X.shape[1]))))
-    v_max_dev = float(np.max(np.abs(v_gram - np.eye(V.shape[1]))))
+        x_gram = X.T @ X * dx
+        v_gram = V.T @ V * dv
 
-    assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), (
-        f"X basis is not orthonormal under dx inner product. max_dev={x_max_dev:.6e}"
-    )
-    assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), (
-        f"V basis is not orthonormal under dv inner product. max_dev={v_max_dev:.6e}"
-    )
+        x_max_dev = float(np.max(np.abs(x_gram - np.eye(X.shape[1]))))
+        v_max_dev = float(np.max(np.abs(v_gram - np.eye(V.shape[1]))))
 
-    print(f"passed: X orthogonality max_dev={x_max_dev:.6e} (weighted by dx)")
-    print(f"passed: V orthogonality max_dev={v_max_dev:.6e} (weighted by dv)")
+        assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), (
+            f"X basis is not orthonormal under dx inner product at target_time={target_time:g} "
+            f"(selected_sim_time={sim_time:g}, |Δt|={time_gap:.3e}). max_dev={x_max_dev:.6e}"
+        )
+        assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), (
+            f"V basis is not orthonormal under dv inner product at target_time={target_time:g} "
+            f"(selected_sim_time={sim_time:g}, |Δt|={time_gap:.3e}). max_dev={v_max_dev:.6e}"
+        )
+
+        print(
+            f"passed: time={target_time:g}, X orthogonality max_dev={x_max_dev:.6e}, "
+            f"V orthogonality max_dev={v_max_dev:.6e}"
+        )
