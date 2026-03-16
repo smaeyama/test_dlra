@@ -27,8 +27,11 @@ pip install -r requirements.txt
 ### (i) 初期値作成
 
 ```bash
-python stage1_create_initial.py --out initial_state.nc --flag-init two-stream
+python stage1_create_initial.py --out initial_state.nc --reference-out reference_result.nc --flag-init two-stream
 ```
+
+
+`stage1_create_initial.py` は初期値 `initial_state.nc` に加えて、フル分布関数で時間発展した参照データ `reference_result.nc` も同時に保存します。
 
 ### (ii) 動的低ランク近似シミュレーション
 
@@ -39,7 +42,7 @@ python stage2_simulate_dlra.py --initial initial_state.nc --out simulation_resul
 ### (iii) 結果可視化
 
 ```bash
-python stage3_visualize_results.py --sim simulation_result.nc
+python stage3_visualize_results.py --reference reference_result.nc --sim simulation_result.nc
 ```
 
 各ステージ間のデータ受け渡しは `xarray` を使った NetCDF (`.nc`) です。
