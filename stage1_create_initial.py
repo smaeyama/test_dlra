@@ -13,6 +13,9 @@ import xarray as xr
 from numpy.fft import fft, fftfreq, ifft
 
 
+FD_MAX_RECOMMENDED_DT = 0.05
+
+
 @dataclass
 class Grid:
     x: np.ndarray
@@ -107,7 +110,41 @@ def time_advance_in_v(f_vx: np.ndarray, efield: np.ndarray, dt: float, grid: Gri
     return np.real(ifft(f_hat * phase, axis=0))
 
 
-def run_reference_simulation(f_init_vx: np.ndarray, grid: Grid, dt: float, nt: int, nskip: int):
+def first_derivative_periodic(arr: np.ndarray, h: float, axis: int):
+    return (
+        -np.roll(arr, -2, axis=axis)
+        + 8 * np.roll(arr, -1, axis=axis)
+        - 8 * np.roll(arr, 1, axis=axis)
+        + np.roll(arr, 2, axis=axis)
+    ) / (12.0 * h)
+
+
+def vlasov_rhs_fd(f_vx: np.ndarray, grid: Grid):
+    _, _, efield = solve_poisson_full(f_vx, grid)
+    dfdx = first_derivative_periodic(f_vx, grid.dx, axis=1)
+    dfdv = first_derivative_periodic(f_vx, grid.dv, axis=0)
+    rhs = -(grid.v[:, None] * dfdx) + efield[None, :] * dfdv
+    return rhs, efield
+
+
+def time_advance_fd_rk4(f_vx: np.ndarray, dt: float, grid: Grid):
+    k1, _ = vlasov_rhs_fd(f_vx, grid)
+    k2, _ = vlasov_rhs_fd(f_vx + 0.5 * dt * k1, grid)
+    k3, _ = vlasov_rhs_fd(f_vx + 0.5 * dt * k2, grid)
+    k4, _ = vlasov_rhs_fd(f_vx + dt * k3, grid)
+    f_new = f_vx + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+    rho, phi, efield = solve_poisson_full(f_new, grid)
+    return f_new, rho, phi, efield
+
+
+def run_reference_simulation(
+    f_init_vx: np.ndarray,
+    grid: Grid,
+    dt: float,
+    nt: int,
+    nskip: int,
+    solver: str,
+):
     nsave = (nt - 1) // nskip + 1
     t_all = np.zeros(nsave)
     f_all = np.zeros((nsave, grid.nv, grid.nx))
@@ -127,9 +164,14 @@ def run_reference_simulation(f_init_vx: np.ndarray, grid: Grid, dt: float, nt: i
         e_all[i_save] = efield
 
         for _ in range(nskip):
-            f, rho, phi, efield = time_advance_in_x(f, dt / 2.0, grid)
-            f = time_advance_in_v(f, efield, dt, grid)
-            f, rho, phi, efield = time_advance_in_x(f, dt / 2.0, grid)
+            if solver == "semi-Lagrangian":
+                f, rho, phi, efield = time_advance_in_x(f, dt / 2.0, grid)
+                f = time_advance_in_v(f, efield, dt, grid)
+                f, rho, phi, efield = time_advance_in_x(f, dt / 2.0, grid)
+            elif solver == "finite-difference":
+                f, rho, phi, efield = time_advance_fd_rk4(f, dt, grid)
+            else:
+                raise ValueError(f"Unknown solver: {solver}")
             t += dt
 
     return t_all, f_all, rho_all, phi_all, e_all
@@ -140,10 +182,22 @@ def main():
     parser.add_argument("--out", default="initial_state.nc")
     parser.add_argument("--reference-out", default="reference_result.nc")
     parser.add_argument("--flag-init", default="two-stream")
-    parser.add_argument("--dt", type=float, default=0.25)
+    parser.add_argument("--solver", choices=["semi-Lagrangian", "finite-difference"], default="semi-Lagrangian")
+    parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--nt", type=int, default=1000)
     parser.add_argument("--nskip", type=int, default=20)
     args = parser.parse_args()
+
+    if args.dt is None:
+        dt = 0.25 if args.solver == "semi-Lagrangian" else 0.025
+    else:
+        dt = args.dt
+
+    if args.solver == "finite-difference" and dt > FD_MAX_RECOMMENDED_DT:
+        raise ValueError(
+            "finite-difference solver requires a small time step comparable to stage2; "
+            f"please use dt <= {FD_MAX_RECOMMENDED_DT}. (got dt={dt})"
+        )
 
     f_vx, grid = build_initial_distribution(flag_init=args.flag_init)
     rho, phi, efield = solve_poisson_full(f_vx, grid)
@@ -164,9 +218,10 @@ def main():
     t_all, f_all, rho_all, phi_all, e_all = run_reference_simulation(
         f_init_vx=f_vx,
         grid=grid,
-        dt=args.dt,
+        dt=dt,
         nt=args.nt,
         nskip=args.nskip,
+        solver=args.solver,
     )
     kinetic = 0.5 * np.sum(f_all * (grid.v[:, None] ** 2)[None, :, :], axis=(1, 2)) * grid.dx * grid.dv
     field = 0.5 * np.sum(e_all**2, axis=1) * grid.dx
@@ -182,10 +237,11 @@ def main():
         },
         coords={"time": t_all, "x": grid.x, "v": grid.v},
         attrs={
-            "dt": args.dt,
+            "dt": dt,
             "nt": args.nt,
             "nskip": args.nskip,
             "flag_init": args.flag_init,
+            "solver": args.solver,
             "source_initial_file": args.out,
         },
     )
