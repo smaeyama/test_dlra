@@ -45,7 +45,7 @@ python dlra_Vlasov_sim.py --initial initial_state.nc --out simulation_result.nc 
 python plot_figure.py --reference reference_result.nc --sim simulation_result.nc
 ```
 
-揺動分布関数を見たい場合は、平衡分布を差し引いた表示に切り替えられます。
+You can switch to visualize the perturbed distribution function subtracted the equilibrium.
 
 ```bash
 python plot_figure.py --reference reference_result.nc --sim simulation_result.nc --plot-mode fluctuation
