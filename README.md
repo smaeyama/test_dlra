@@ -45,9 +45,37 @@ python dlra_Vlasov_sim.py --initial initial_state.nc --out simulation_result.nc 
 python plot_figure.py --reference reference_result.nc --sim simulation_result.nc
 ```
 
+揺動分布関数を見たい場合は、平衡分布を差し引いた表示に切り替えられます。
+
+```bash
+python plot_figure.py --reference reference_result.nc --sim simulation_result.nc --plot-mode fluctuation
+```
+
 Each stage exchanges data through NetCDF (`.nc`) files that can be read with `xarray`.
 The DLRA simulation stores the low-rank factors `X(time,x,rank)`, `S(time,rank,rank)`, and `V(time,v,rank)` instead of the full `f(x,v)` field.
 `plot_figure.py` reconstructs the full field for visualization using `LowRankApprox.to_full()` when needed.
+
+## Example
+
+`examples/linear_landau_damping.py` runs a full linear Landau damping workflow:
+
+- create the linear-Landau initial condition
+- compute a grid-based reference solution
+- compute the DLRA solution
+- save NetCDF outputs and a summary PNG figure
+
+```bash
+python3 examples/linear_landau_damping.py
+```
+
+By default the script writes its outputs under `examples/output/linear_landau/`.
+
+Additional wrapper examples are also available:
+
+```bash
+python3 examples/bump_on_tail.py
+python3 examples/two_stream.py
+```
 
 ## Tests
 
