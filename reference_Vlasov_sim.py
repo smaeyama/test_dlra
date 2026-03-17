@@ -36,6 +36,27 @@ def _default_grid_parameters(flag_init: str) -> tuple[int, int, float, float]:
     raise ValueError(f"Unknown flag_init: {flag_init}")
 
 
+def equilibrium_profile(flag_init: str, v: np.ndarray) -> np.ndarray:
+    fmx = np.exp(-0.5 * v**2) / np.sqrt(2 * np.pi)
+
+    if flag_init in {"linear-Landau", "nonlinear-Landau"}:
+        return fmx
+    if flag_init == "bump-on-tail":
+        nb, vb, vtb = 0.2, 2.0, 0.3
+        bump = np.exp(-0.5 * ((v - vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
+        return (1.0 - nb) * fmx + nb * bump
+    if flag_init == "two-stream":
+        nb, vb, vtb = 0.5, 3.0, 1.0
+        f0b_pos = np.exp(-0.5 * ((v - vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
+        f0b_neg = np.exp(-0.5 * ((v + vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
+        return (1.0 - nb) * f0b_pos + nb * f0b_neg
+    raise ValueError(f"Unknown flag_init: {flag_init}")
+
+
+def equilibrium_distribution(flag_init: str, x: np.ndarray, v: np.ndarray) -> np.ndarray:
+    return np.broadcast_to(equilibrium_profile(flag_init, v)[:, None], (v.size, x.size)).copy()
+
+
 def build_initial_distribution(
     flag_init: str = "two-stream",
     seed: int = 0,
@@ -58,17 +79,15 @@ def build_initial_distribution(
     rng = np.random.default_rng(seed)
     if flag_init == "linear-Landau":
         ampl = 1e-3
-        f0_v = fmx.copy()
+        f0_v = equilibrium_profile(flag_init, v)
         f = f0_v[:, None] + ampl * np.cos(4 * np.pi * x / lx)[None, :] * fmx[:, None]
     elif flag_init == "nonlinear-Landau":
         ampl = 0.2
-        f0_v = fmx.copy()
+        f0_v = equilibrium_profile(flag_init, v)
         f = f0_v[:, None] + ampl * np.cos(4 * np.pi * x / lx)[None, :] * fmx[:, None]
     elif flag_init == "bump-on-tail":
         ampl = 1e-3
-        nb, vb, vtb = 0.2, 2.0, 0.3
-        bump = np.exp(-0.5 * ((v - vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
-        f0_v = (1.0 - nb) * fmx + nb * bump
+        f0_v = equilibrium_profile(flag_init, v)
         f = np.zeros((nv, nx))
         rand_phases = rng.random(nx // 4)
         for ik in range(1, nx // 4):
@@ -80,7 +99,7 @@ def build_initial_distribution(
         nb, vb, vtb = 0.5, 3.0, 1.0
         f0b_pos = np.exp(-0.5 * ((v - vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
         f0b_neg = np.exp(-0.5 * ((v + vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
-        f0_v = (1.0 - nb) * f0b_pos + nb * f0b_neg
+        f0_v = equilibrium_profile(flag_init, v)
         f = np.zeros((nv, nx))
         phase1 = 2 * np.pi * rng.random(nx // 4)
         phase2 = 2 * np.pi * rng.random(nx // 4)

@@ -6,13 +6,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-temp_test_dlra")
+import matplotlib
+if os.environ.get("MPLBACKEND"):
+    matplotlib.use(os.environ["MPLBACKEND"])
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import numpy as np
 import xarray as xr
 
 from low_rank_approx import LowRankApprox
+from reference_Vlasov_sim import equilibrium_distribution
 
 
 def _reconstruct_dlra_f(ds: xr.Dataset, indices: list[int]) -> np.ndarray:
@@ -36,6 +42,33 @@ def _select_times(ds: xr.Dataset, times: list[float]):
     return indices, t[indices]
 
 
+def _flag_init_from_datasets(ds_ref: xr.Dataset, ds_dlra: xr.Dataset) -> str:
+    flag_init = ds_ref.attrs.get("flag_init") or ds_dlra.attrs.get("flag_init")
+    if flag_init is None:
+        raise ValueError("flag_init is required in the dataset attrs to reconstruct the equilibrium distribution.")
+    return str(flag_init)
+
+
+def _prepare_plot_fields(
+    ds_ref: xr.Dataset,
+    ds_dlra: xr.Dataset,
+    ref_indices: list[int],
+    dlra_indices: list[int],
+    plot_mode: str,
+) -> tuple[np.ndarray, np.ndarray, str, str]:
+    f_ref = ds_ref["f"].values[ref_indices]
+    f_dlra = _reconstruct_dlra_f(ds_dlra, dlra_indices)
+
+    if plot_mode == "full":
+        return f_ref, f_dlra, "f(x,v)", "viridis"
+
+    flag_init = _flag_init_from_datasets(ds_ref, ds_dlra)
+    equilibrium = equilibrium_distribution(flag_init, ds_ref["x"].values, ds_ref["v"].values).T
+    fluctuation_ref = f_ref - equilibrium[None, :, :]
+    fluctuation_dlra = f_dlra - equilibrium[None, :, :]
+    return fluctuation_ref, fluctuation_dlra, "delta f(x,v)", "coolwarm"
+
+
 def _plot_section(
     fig: plt.Figure,
     gs: GridSpec,
@@ -45,6 +78,9 @@ def _plot_section(
     selected_indices: list[int],
     selected_times: np.ndarray,
     selected_f: np.ndarray,
+    colorbar_label: str,
+    cmap: str,
+    plot_mode: str,
 ):
     x = ds["x"].values
     v = ds["v"].values
@@ -56,11 +92,15 @@ def _plot_section(
     cbar_ax = fig.add_subplot(gs[row_offset : row_offset + 2, n_panels])
     energy_ax = fig.add_subplot(gs[row_offset + 2, :])
 
-    vmin = float(np.min(selected_f))
-    vmax = float(np.max(selected_f))
+    if plot_mode == "fluctuation":
+        vmax = float(np.max(np.abs(selected_f)))
+        vmin = -vmax
+    else:
+        vmin = float(np.min(selected_f))
+        vmax = float(np.max(selected_f))
     pcm = None
     for i, (idx, t_snap, ax_f, ax_phi) in enumerate(zip(selected_indices, selected_times, phase_axes, phi_axes)):
-        pcm = ax_f.pcolormesh(x, v, selected_f[i].T, shading="auto", cmap="viridis", vmin=vmin, vmax=vmax)
+        pcm = ax_f.pcolormesh(x, v, selected_f[i].T, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
         ax_f.set_title(f"t = {t_snap:.1f}")
         if i == 0:
             ax_f.set_ylabel("v")
@@ -77,14 +117,19 @@ def _plot_section(
         ax_phi.grid(True, alpha=0.3)
 
     if pcm is not None:
-        fig.colorbar(pcm, cax=cbar_ax, label="f(x,v)")
+        fig.colorbar(pcm, cax=cbar_ax, label=colorbar_label)
 
-    energy_ax.plot(t, ds["kinetic_energy"].values, label="Kinetic")
-    energy_ax.plot(t, ds["field_energy"].values, label="Field")
-    energy_ax.plot(t, ds["total_energy"].values, label="Total")
+    if plot_mode == "fluctuation":
+        energy_ax.plot(t, ds["field_energy"].values, label="Field")
+        energy_ax.set_title(f"Field energy from {heading}")
+        energy_ax.set_yscale("log")
+    else:
+        energy_ax.plot(t, ds["kinetic_energy"].values, label="Kinetic")
+        energy_ax.plot(t, ds["field_energy"].values, label="Field")
+        energy_ax.plot(t, ds["total_energy"].values, label="Total")
+        energy_ax.set_title(f"Energy evolution from {heading}")
     energy_ax.set_xlabel("Time")
     energy_ax.set_ylabel("Energy")
-    energy_ax.set_title(f"Energy evolution from {heading}")
     energy_ax.grid(True, alpha=0.3)
     energy_ax.legend()
 
@@ -100,12 +145,24 @@ def _plot_section(
     )
 
 
-def plot_summary(ds_ref: xr.Dataset, ds_dlra: xr.Dataset, times: list[float]):
+def plot_summary(
+    ds_ref: xr.Dataset,
+    ds_dlra: xr.Dataset,
+    times: list[float],
+    save: str | None = None,
+    show: bool = True,
+    plot_mode: str = "full",
+):
     ref_indices, ref_times = _select_times(ds_ref, times)
     dlra_indices, dlra_times = _select_times(ds_dlra, times)
 
-    f_ref = ds_ref["f"].values[ref_indices]
-    f_dlra = _reconstruct_dlra_f(ds_dlra, dlra_indices)
+    f_ref, f_dlra, colorbar_label, cmap = _prepare_plot_fields(
+        ds_ref=ds_ref,
+        ds_dlra=ds_dlra,
+        ref_indices=ref_indices,
+        dlra_indices=dlra_indices,
+        plot_mode=plot_mode,
+    )
 
     n_panels = len(times)
     fig = plt.figure(figsize=(4 * n_panels + 2.5, 16), constrained_layout=True)
@@ -126,6 +183,9 @@ def plot_summary(ds_ref: xr.Dataset, ds_dlra: xr.Dataset, times: list[float]):
         selected_indices=ref_indices,
         selected_times=ref_times,
         selected_f=f_ref,
+        colorbar_label=colorbar_label,
+        cmap=cmap,
+        plot_mode=plot_mode,
     )
     _plot_section(
         fig=fig,
@@ -136,9 +196,17 @@ def plot_summary(ds_ref: xr.Dataset, ds_dlra: xr.Dataset, times: list[float]):
         selected_indices=dlra_indices,
         selected_times=dlra_times,
         selected_f=f_dlra,
+        colorbar_label=colorbar_label,
+        cmap=cmap,
+        plot_mode=plot_mode,
     )
 
-    plt.show()
+    if save is not None:
+        fig.savefig(save, dpi=180)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def main():
@@ -146,7 +214,13 @@ def main():
     parser.add_argument("--reference", default="reference_result.nc")
     parser.add_argument("--sim", default="simulation_result.nc")
     parser.add_argument("--times", nargs="*", type=float, default=[0.0, 10.0, 15.0, 20.0])
+    parser.add_argument("--plot-mode", choices=["full", "fluctuation"], default="full")
+    parser.add_argument("--save", default=None, help="Optional path to save the figure")
+    parser.add_argument("--no-show", action="store_true", help="Save or render without opening an interactive window")
     args = parser.parse_args()
+
+    if args.no_show:
+        matplotlib.use("Agg")
 
     ds_ref = xr.load_dataset(args.reference)
     ds_dlra = xr.load_dataset(args.sim)
@@ -159,7 +233,7 @@ def main():
         print(f"reference: nearest t = {t_ref[idx_ref]:.2f}, index={idx_ref}")
         print(f"dlra:      nearest t = {t_dlra[idx_dlra]:.2f}, index={idx_dlra}")
 
-    plot_summary(ds_ref, ds_dlra, args.times)
+    plot_summary(ds_ref, ds_dlra, args.times, save=args.save, show=not args.no_show, plot_mode=args.plot_mode)
 
 
 if __name__ == "__main__":
