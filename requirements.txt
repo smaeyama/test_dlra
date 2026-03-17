@@ -4,3 +4,5 @@ tqdm
 xarray
 pytest
 scipy
+h5py
+jax[cpu]
