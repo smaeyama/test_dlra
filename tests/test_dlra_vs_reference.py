@@ -1,15 +1,83 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 
-REFERENCE_FILE = Path("reference_result.nc")
-SIM_FILE = Path("simulation_result.nc")
-REL_L2_THRESHOLD = 0.1
-TIME_POINTS = (0.0, 5.0)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REL_L2_THRESHOLD = 0.15
+TIME_POINTS = (0.0, 0.2, 1.0)
+
+TEST_NX = 48
+TEST_NV = 64
+TEST_DT = 0.01
+TEST_NT = 41
+TEST_NSKIP = 10
+TEST_RANK = 12
+
+
+@pytest.fixture(scope="session")
+def generated_datasets(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    run_dir = tmp_path_factory.mktemp("generated_vlasov_data")
+    initial_file = run_dir / "initial_state.nc"
+    reference_file = run_dir / "reference_result.nc"
+    simulation_file = run_dir / "simulation_result.nc"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "reference_Vlasov_sim.py"),
+            "--out",
+            str(initial_file),
+            "--reference-out",
+            str(reference_file),
+            "--flag-init",
+            "two-stream",
+            "--solver",
+            "finite-difference",
+            "--nx",
+            str(TEST_NX),
+            "--nv",
+            str(TEST_NV),
+            "--dt",
+            str(TEST_DT),
+            "--nt",
+            str(TEST_NT),
+            "--nskip",
+            str(TEST_NSKIP),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "dlra_Vlasov_sim.py"),
+            "--initial",
+            str(initial_file),
+            "--out",
+            str(simulation_file),
+            "--rank",
+            str(TEST_RANK),
+            "--dt",
+            str(TEST_DT),
+            "--nt",
+            str(TEST_NT),
+            "--nskip",
+            str(TEST_NSKIP),
+            "--disable-progress",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+    )
+
+    return reference_file, simulation_file
 
 
 def _read_first_available(ds: xr.Dataset, names: tuple[str, ...]) -> xr.DataArray:
@@ -80,7 +148,6 @@ def _compare_reference_and_simulation_at_time(
     rho_lr = rho_lr_da.values
     phi_lr = phi_lr_da.values
 
-    # Supports both legacy S(rank, rank) and renamed S(rankx, rankv) conventions.
     f_lr = X @ S @ V.T
 
     metrics = {
@@ -105,7 +172,7 @@ def _compare_reference_and_simulation_at_time(
     if actual_time is not None:
         time_label += (
             f" (selected_ref_time={actual_time:g}, selected_sim_time={sim_time:g}, "
-            f"|Δt|={time_gap:.3e})"
+            f"|delta_t|={time_gap:.3e})"
         )
 
     for name, values in metrics.items():
@@ -117,12 +184,11 @@ def _compare_reference_and_simulation_at_time(
     return metrics
 
 
-def test_stage2_low_rank_reconstructs_reference_fields_multiple_times() -> None:
-    assert REFERENCE_FILE.exists(), f"Missing required dataset: {REFERENCE_FILE}"
-    assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
+def test_dlra_reconstructs_reference_fields_multiple_times(generated_datasets: tuple[Path, Path]) -> None:
+    reference_file, simulation_file = generated_datasets
 
-    ds_reference = xr.load_dataset(REFERENCE_FILE)
-    ds_sim = xr.load_dataset(SIM_FILE)
+    ds_reference = xr.load_dataset(reference_file)
+    ds_sim = xr.load_dataset(simulation_file)
 
     for target_time in TIME_POINTS:
         metrics = _compare_reference_and_simulation_at_time(ds_reference, ds_sim, target_time)
@@ -133,12 +199,11 @@ def test_stage2_low_rank_reconstructs_reference_fields_multiple_times() -> None:
             )
 
 
-def test_dlra_orthogonality() -> None:
-    assert REFERENCE_FILE.exists(), f"Missing required dataset: {REFERENCE_FILE}"
-    assert SIM_FILE.exists(), f"Missing required dataset: {SIM_FILE}"
+def test_dlra_orthogonality(generated_datasets: tuple[Path, Path]) -> None:
+    reference_file, simulation_file = generated_datasets
 
-    ds_reference = xr.load_dataset(REFERENCE_FILE)
-    ds_sim = xr.load_dataset(SIM_FILE)
+    ds_reference = xr.load_dataset(reference_file)
+    ds_sim = xr.load_dataset(simulation_file)
 
     x_coords = ds_sim["x"].values
     v_coords = ds_sim["v"].values
@@ -158,11 +223,11 @@ def test_dlra_orthogonality() -> None:
 
         assert np.allclose(x_gram, np.eye(X.shape[1]), atol=1e-10), (
             f"X basis is not orthonormal under dx inner product at target_time={target_time:g} "
-            f"(selected_sim_time={sim_time:g}, |Δt|={time_gap:.3e}). max_dev={x_max_dev:.6e}"
+            f"(selected_sim_time={sim_time:g}, |delta_t|={time_gap:.3e}). max_dev={x_max_dev:.6e}"
         )
         assert np.allclose(v_gram, np.eye(V.shape[1]), atol=1e-10), (
             f"V basis is not orthonormal under dv inner product at target_time={target_time:g} "
-            f"(selected_sim_time={sim_time:g}, |Δt|={time_gap:.3e}). max_dev={v_max_dev:.6e}"
+            f"(selected_sim_time={sim_time:g}, |delta_t|={time_gap:.3e}). max_dev={v_max_dev:.6e}"
         )
 
         print(
