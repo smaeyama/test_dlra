@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Stage (i): initial value creation and NetCDF output."""
+"""Create an initial Vlasov state and an optional reference simulation in NetCDF format."""
 
 from __future__ import annotations
 
@@ -28,22 +28,34 @@ class Grid:
     lv: float
 
 
-def build_initial_distribution(flag_init: str = "two-stream", seed: int = 0):
+def _default_grid_parameters(flag_init: str) -> tuple[int, int, float, float]:
     if flag_init in {"linear-Landau", "nonlinear-Landau", "bump-on-tail"}:
-        nx, nv = 128, 256
-        lx, lv = 10 * np.pi, 5.0
-    elif flag_init == "two-stream":
-        nx, nv = 128, 256
-        lx, lv = 100.0, 9.0
-    else:
-        raise ValueError(f"Unknown flag_init: {flag_init}")
+        return 128, 256, 10 * np.pi, 5.0
+    if flag_init == "two-stream":
+        return 128, 256, 100.0, 9.0
+    raise ValueError(f"Unknown flag_init: {flag_init}")
+
+
+def build_initial_distribution(
+    flag_init: str = "two-stream",
+    seed: int = 0,
+    nx: int | None = None,
+    nv: int | None = None,
+    lx: float | None = None,
+    lv: float | None = None,
+):
+    default_nx, default_nv, default_lx, default_lv = _default_grid_parameters(flag_init)
+    nx = default_nx if nx is None else nx
+    nv = default_nv if nv is None else nv
+    lx = default_lx if lx is None else lx
+    lv = default_lv if lv is None else lv
 
     dx, dv = lx / nx, 2 * lv / (nv - 1)
     x = np.linspace(0.0, lx, nx, endpoint=False)
     v = np.linspace(-lv, lv, nv)
     fmx = np.exp(-0.5 * v**2) / np.sqrt(2 * np.pi)
 
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     if flag_init == "linear-Landau":
         ampl = 1e-3
         f0_v = fmx.copy()
@@ -58,26 +70,28 @@ def build_initial_distribution(flag_init: str = "two-stream", seed: int = 0):
         bump = np.exp(-0.5 * ((v - vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
         f0_v = (1.0 - nb) * fmx + nb * bump
         f = np.zeros((nv, nx))
-        rand_phases = np.random.rand(nx // 4)
+        rand_phases = rng.random(nx // 4)
         for ik in range(1, nx // 4):
             phase = 2 * np.pi * rand_phases[ik]
             f += ampl * np.cos(2 * np.pi * (ik * x / lx + phase))[None, :] * fmx[:, None]
         f += f0_v[:, None]
-    else:
+    elif flag_init == "two-stream":
         ampl = 2e-3
         nb, vb, vtb = 0.5, 3.0, 1.0
         f0b_pos = np.exp(-0.5 * ((v - vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
         f0b_neg = np.exp(-0.5 * ((v + vb) / vtb) ** 2) / np.sqrt(2 * np.pi * vtb**2)
         f0_v = (1.0 - nb) * f0b_pos + nb * f0b_neg
         f = np.zeros((nv, nx))
-        phase1 = 2 * np.pi * np.random.rand(nx // 4)
-        phase2 = 2 * np.pi * np.random.rand(nx // 4)
+        phase1 = 2 * np.pi * rng.random(nx // 4)
+        phase2 = 2 * np.pi * rng.random(nx // 4)
         for ik in range(1, nx // 4):
             f += (
                 ampl * np.cos(2 * np.pi * (ik * x / lx + phase1[ik]))[None, :] * f0b_pos[:, None]
                 + ampl * np.cos(2 * np.pi * (ik * x / lx + phase2[ik]))[None, :] * f0b_neg[:, None]
             )
         f += f0_v[:, None]
+    else:
+        raise ValueError(f"Unknown flag_init: {flag_init}")
 
     return f, Grid(x=x, v=v, dx=dx, dv=dv, nx=nx, nv=nv, lx=lx, lv=lv)
 
@@ -178,7 +192,7 @@ def run_reference_simulation(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage (i): create initial NetCDF")
+    parser = argparse.ArgumentParser(description="Create initial and reference Vlasov simulation NetCDF files")
     parser.add_argument("--out", default="initial_state.nc")
     parser.add_argument("--reference-out", default="reference_result.nc")
     parser.add_argument("--flag-init", default="two-stream")
@@ -186,6 +200,11 @@ def main():
     parser.add_argument("--dt", type=float, default=None)
     parser.add_argument("--nt", type=int, default=1000)
     parser.add_argument("--nskip", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--nx", type=int, default=None)
+    parser.add_argument("--nv", type=int, default=None)
+    parser.add_argument("--lx", type=float, default=None)
+    parser.add_argument("--lv", type=float, default=None)
     args = parser.parse_args()
 
     if args.dt is None:
@@ -195,11 +214,18 @@ def main():
 
     if args.solver == "finite-difference" and dt > FD_MAX_RECOMMENDED_DT:
         raise ValueError(
-            "finite-difference solver requires a small time step comparable to stage2; "
+            "finite-difference solver requires a small time step comparable to DLRA; "
             f"please use dt <= {FD_MAX_RECOMMENDED_DT}. (got dt={dt})"
         )
 
-    f_vx, grid = build_initial_distribution(flag_init=args.flag_init)
+    f_vx, grid = build_initial_distribution(
+        flag_init=args.flag_init,
+        seed=args.seed,
+        nx=args.nx,
+        nv=args.nv,
+        lx=args.lx,
+        lv=args.lv,
+    )
     rho, phi, efield = solve_poisson_full(f_vx, grid)
 
     ds = xr.Dataset(
@@ -210,10 +236,17 @@ def main():
             "E_init": (("x",), efield),
         },
         coords={"x": grid.x, "v": grid.v},
-        attrs={"nx": grid.nx, "nv": grid.nv, "lx": grid.lx, "lv": grid.lv, "flag_init": args.flag_init},
+        attrs={
+            "nx": grid.nx,
+            "nv": grid.nv,
+            "lx": grid.lx,
+            "lv": grid.lv,
+            "flag_init": args.flag_init,
+            "seed": args.seed,
+        },
     )
     ds.to_netcdf(args.out)
-    print(f"[stage i] wrote initial dataset: {args.out}")
+    print(f"[reference] wrote initial dataset: {args.out}")
 
     t_all, f_all, rho_all, phi_all, e_all = run_reference_simulation(
         f_init_vx=f_vx,
@@ -242,11 +275,12 @@ def main():
             "nskip": args.nskip,
             "flag_init": args.flag_init,
             "solver": args.solver,
+            "seed": args.seed,
             "source_initial_file": args.out,
         },
     )
     ds_ref.to_netcdf(args.reference_out)
-    print(f"[stage i] wrote reference simulation dataset: {args.reference_out}")
+    print(f"[reference] wrote reference simulation dataset: {args.reference_out}")
 
 
 if __name__ == "__main__":
