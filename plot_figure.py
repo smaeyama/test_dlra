@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Stage (iii): visualize reference and DLRA simulation results side-by-side."""
+"""Visualize reference and DLRA Vlasov simulation results side-by-side."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def plot_summary(ds_ref: xr.Dataset, ds_dlra: xr.Dataset, times: list[float]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage (iii): visualize reference and DLRA results")
+    parser = argparse.ArgumentParser(description="Visualize reference and DLRA results")
     parser.add_argument("--reference", default="reference_result.nc")
     parser.add_argument("--sim", default="simulation_result.nc")
     parser.add_argument("--times", nargs="*", type=float, default=[0.0, 10.0, 15.0, 20.0])
@@ -156,8 +156,8 @@ def main():
     for t_plot in args.times:
         idx_ref = int(np.argmin(np.abs(t_ref - t_plot)))
         idx_dlra = int(np.argmin(np.abs(t_dlra - t_plot)))
-        print(f"reference: t ≈ {t_ref[idx_ref]:.2f}, index={idx_ref}")
-        print(f"dlra:      t ≈ {t_dlra[idx_dlra]:.2f}, index={idx_dlra}")
+        print(f"reference: nearest t = {t_ref[idx_ref]:.2f}, index={idx_ref}")
+        print(f"dlra:      nearest t = {t_dlra[idx_dlra]:.2f}, index={idx_dlra}")
 
     plot_summary(ds_ref, ds_dlra, args.times)
 

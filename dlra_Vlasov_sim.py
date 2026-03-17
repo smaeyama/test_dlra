@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Stage (ii): dynamic low-rank approximation simulation and NetCDF output."""
+"""Run a dynamic low-rank Vlasov simulation and save the factors to NetCDF."""
 
 from __future__ import annotations
 
@@ -119,13 +119,14 @@ def step_split(f_lra: LowRankApprox, efield: np.ndarray, dt: float, v: np.ndarra
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage (ii): simulate DLRA from initial NetCDF")
+    parser = argparse.ArgumentParser(description="Run a DLRA Vlasov simulation from an initial NetCDF file")
     parser.add_argument("--initial", default="initial_state.nc")
     parser.add_argument("--out", default="simulation_result.nc")
     parser.add_argument("--rank", type=int, default=64)
     parser.add_argument("--dt", type=float, default=0.025)
     parser.add_argument("--nt", type=int, default=1000)
     parser.add_argument("--nskip", type=int, default=20)
+    parser.add_argument("--disable-progress", action="store_true")
     args = parser.parse_args()
 
     ds0 = xr.load_dataset(args.initial)
@@ -136,6 +137,9 @@ def main():
     nx, nv = f_init.shape
     dx = float(x[1] - x[0])
     dv = float(v[1] - v[0])
+
+    if args.rank > min(nx, nv):
+        raise ValueError(f"rank must be <= min(nx, nv) = {min(nx, nv)} (got {args.rank})")
 
     f_lra = LowRankApprox(nx, nv, args.rank)
     f_lra.init_from_full(f_init, dx=dx, dv=dv)
@@ -150,7 +154,11 @@ def main():
     e_all = np.zeros((nsave, nx))
 
     t = 0.0
-    for i_save in tqdm(range(nsave), desc="DLRA"):
+    iterator = range(nsave)
+    if not args.disable_progress:
+        iterator = tqdm(iterator, desc="DLRA")
+
+    for i_save in iterator:
         rho, phi, efield = solve_poisson_lra(f_lra, dv=dv, dx=dx)
         t_all[i_save] = t
         X_all[i_save] = f_lra.X
@@ -191,7 +199,7 @@ def main():
         },
     )
     ds.to_netcdf(args.out)
-    print(f"[stage ii] wrote simulation dataset: {args.out}")
+    print(f"[dlra] wrote simulation dataset: {args.out}")
 
 
 if __name__ == "__main__":
