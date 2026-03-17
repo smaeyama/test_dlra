@@ -50,6 +50,12 @@ def _array_add(arr, index, value):
     return arr
 
 
+def _weighted_qr_left_backend(matrix: np.ndarray, weight: float) -> tuple[np.ndarray, np.ndarray]:
+    q, r = jnp.linalg.qr(matrix, mode="reduced") if JAX_AVAILABLE else np.linalg.qr(matrix, mode="reduced")
+    sqrt_weight = np.sqrt(weight)
+    return q / sqrt_weight, r * sqrt_weight
+
+
 @dataclass
 class GKParameters:
     nz: int = 24 * 5
@@ -352,6 +358,234 @@ def compute_density_moment(fk: np.ndarray, geom: GKGeometry) -> np.ndarray:
     return _vintegral_species(fk, geom)
 
 
+def _mu_integration_weights(geom: GKGeometry) -> np.ndarray:
+    weights = jnp.zeros((geom.nz_tot, geom.nm_tot), dtype=geom.vp.dtype)
+    weights = _array_set(weights, (slice(None), slice(1, -1)), geom.vp[:, 1:-1])
+    if geom.nm_tot > 1:
+        weights = _array_add(weights, (slice(None), 1), (82.0 / 720.0) * geom.vp[:, 1])
+    if geom.nm_tot > 2:
+        weights = _array_add(weights, (slice(None), 2), (-11.0 / 720.0) * geom.vp[:, 2])
+    weights *= 2.0 * PI * geom.dv * geom.dvp[:, None]
+    return weights
+
+
+def _low_rank_basis_scalar(
+    right_factor: np.ndarray,
+    kernel: np.ndarray,
+    geom: GKGeometry,
+) -> np.ndarray:
+    v_tensor = right_factor.reshape(geom.nv_tot, geom.nm_tot, geom.params.ns, -1)
+    return jnp.einsum("zvms,vmsr,zm->zr", kernel, v_tensor, _mu_integration_weights(geom))
+
+
+def _low_rank_basis_species(
+    right_factor: np.ndarray,
+    kernel: np.ndarray,
+    geom: GKGeometry,
+) -> np.ndarray:
+    v_tensor = right_factor.reshape(geom.nv_tot, geom.nm_tot, geom.params.ns, -1)
+    return jnp.einsum("zvms,vmsr,zm->zsr", kernel, v_tensor, _mu_integration_weights(geom))
+
+
+def _field_kernel_cache(geom: GKGeometry) -> dict[str, np.ndarray]:
+    cache = getattr(geom, "_field_kernel_cache", None)
+    if cache is not None:
+        return cache
+
+    coeff_amp = geom.params.sgn * geom.params.fcs * np.sqrt(geom.params.tau / geom.params.Anum)
+    coeff_h2f = geom.params.sgn * geom.params.Znum / np.sqrt(geom.params.Anum * geom.params.tau)
+    cache = {
+        "kernel_amp": geom.j0[:, None, :, :] * geom.vl[None, :, None, None] * coeff_amp[None, None, None, :],
+        "kernel_phi_h": geom.j0[:, None, :, :] * geom.params.sgn[None, None, None, :] * geom.params.fcs[None, None, None, :],
+        "phi_corr_kernel": (
+            geom.fmx[:, :, :, None]
+            * geom.vl[None, :, None, None]
+            * geom.j0[:, None, :, :] ** 2
+            * (geom.params.sgn * geom.params.fcs * coeff_h2f)[None, None, None, :]
+        ),
+        "dens_corr_kernel": geom.fmx[:, :, :, None] * geom.vl[None, :, None, None] * geom.j0[:, None, :, :] * coeff_h2f[None, None, None, :],
+    }
+    setattr(geom, "_field_kernel_cache", cache)
+    return cache
+
+
+def _low_rank_operator_cache(geom: GKGeometry) -> dict[str, np.ndarray]:
+    cache = getattr(geom, "_low_rank_operator_cache", None)
+    if cache is not None:
+        return cache
+
+    ns = geom.params.ns
+    nv = geom.nv_tot
+    nm = geom.nm_tot
+
+    cs2 = np.sqrt(geom.params.tau / geom.params.Anum)
+    cs_drift = geom.params.sgn * geom.params.tau / geom.params.Znum
+
+    species_idx = np.arange(ns, dtype=float)[None, None, :]
+    vl_grid = np.broadcast_to(np.asarray(geom.vl)[:, None, None], (nv, nm, ns))
+    mu_grid = np.broadcast_to(np.asarray(geom.mu)[None, :, None], (nv, nm, ns))
+    cs2_grid = np.broadcast_to(cs2[None, None, :], (nv, nm, ns))
+    cs_drift_grid = np.broadcast_to(cs_drift[None, None, :], (nv, nm, ns))
+
+    stream_vm = (-vl_grid * cs2_grid).reshape(-1)
+    mirror_vm = (mu_grid * cs2_grid).reshape(-1)
+    kvd_v2_vm = (cs_drift_grid * vl_grid**2).reshape(-1)
+    kvd_mu_vm = (cs_drift_grid * mu_grid).reshape(-1)
+
+    pos_mask = np.broadcast_to((np.asarray(geom.vl) > 0.0)[:, None, None], (nv, nm, ns)).reshape(-1)
+    neg_mask = ~pos_mask
+    cache = {
+        "stream_vm": _backend_array(stream_vm),
+        "mirror_vm": _backend_array(mirror_vm),
+        "kvd_v2_vm": _backend_array(kvd_v2_vm),
+        "kvd_mu_vm": _backend_array(kvd_mu_vm),
+        "pos_mask": _backend_array(pos_mask.astype(float)),
+        "neg_mask": _backend_array(neg_mask.astype(float)),
+        "geom_factor": _backend_array(-(geom.params.ky * np.cos(np.asarray(geom.zz)) + (geom.params.kx + geom.params.s_hat * np.asarray(geom.zz) * geom.params.ky) * np.sin(np.asarray(geom.zz)))),
+        "geom_factor_omg": _backend_array(
+            -(
+                geom.params.ky * np.cos(np.asarray(geom.zz))
+                + (geom.params.kx + geom.params.s_hat * np.asarray(geom.zz) * geom.params.ky) * np.sin(np.asarray(geom.zz))
+            )
+            * np.asarray(geom.omg)
+        ),
+        "mir_z": _backend_array(geom.params.eps_r * np.sin(np.asarray(geom.zz)) / geom.params.q_0),
+        "source_pk_kernel": _backend_array(
+            (
+                -1j
+                * geom.fmx[:, :, :, None]
+                * geom.j0[:, None, :, :]
+                * (geom.kvd - geom.kvs)
+                * (geom.params.sgn * geom.params.Znum / geom.params.tau)[None, None, None, :]
+            ).reshape(geom.nz_tot, geom.nvm)
+        ),
+        "source_dpsi_kernel": _backend_array(
+            (
+                -geom.fmx[:, :, :, None]
+                * geom.vl[None, :, None, None]
+                * (
+                    geom.params.sgn
+                    * geom.params.Znum
+                    / geom.params.tau
+                    * np.sqrt(geom.params.tau / geom.params.Anum)
+                )[None, None, None, :]
+            ).reshape(geom.nz_tot, geom.nvm)
+        ),
+    }
+    setattr(geom, "_low_rank_operator_cache", cache)
+    return cache
+
+
+def solve_fields_from_h_factors(left_factor: np.ndarray, right_factor: np.ndarray, geom: GKGeometry) -> tuple[np.ndarray, np.ndarray]:
+    kernels = _field_kernel_cache(geom)
+    kernel_amp = kernels["kernel_amp"]
+    amp_basis = _low_rank_basis_scalar(right_factor, kernel_amp, geom)
+    amp_src = jnp.sum(left_factor * amp_basis, axis=1)
+    ak = amp_src * geom.params.beta * geom.fct_ampere
+
+    kernel_phi_h = kernels["kernel_phi_h"]
+    phi_basis_h = _low_rank_basis_scalar(right_factor, kernel_phi_h, geom)
+    phi_src_h = jnp.sum(left_factor * phi_basis_h, axis=1)
+
+    kernel_phi_corr = kernels["phi_corr_kernel"]
+    phi_corr = jnp.sum(kernel_phi_corr * _mu_integration_weights(geom)[:, None, :, None], axis=(1, 2, 3))
+    phi_src = phi_src_h - ak * phi_corr
+
+    if geom.params.ns == 1:
+        pk = phi_src / ((1.0 - geom.g0[:, 0]) / geom.params.tau[0] + 1.0)
+    else:
+        pk = phi_src * geom.fct_poisson
+    return pk, ak
+
+
+def compute_density_moment_from_h_factors(left_factor: np.ndarray, right_factor: np.ndarray, ak: np.ndarray, geom: GKGeometry) -> np.ndarray:
+    kernel_density_h = jnp.ones((geom.nz_tot, geom.nv_tot, geom.nm_tot, geom.params.ns), dtype=right_factor.dtype)
+    dens_basis_h = _low_rank_basis_species(right_factor, kernel_density_h, geom)
+    dens_h = jnp.einsum("zr,zsr->zs", left_factor, dens_basis_h)
+
+    kernel_density_corr = _field_kernel_cache(geom)["dens_corr_kernel"]
+    dens_corr = jnp.sum(kernel_density_corr * _mu_integration_weights(geom)[:, None, :, None], axis=(1, 2))
+    return dens_h - ak[:, None] * dens_corr
+
+
+def _five_point_first_derivative(arr: np.ndarray, spacing: np.ndarray, axis: int) -> np.ndarray:
+    if axis == 0:
+        return (
+            -jnp.roll(arr, -2, axis=0)
+            + 8.0 * jnp.roll(arr, -1, axis=0)
+            - 8.0 * jnp.roll(arr, 1, axis=0)
+            + jnp.roll(arr, 2, axis=0)
+        ) / (12.0 * spacing[:, None, None])
+    raise ValueError("Only axis=0 is supported")
+
+
+def _derivative_v_right_factor(right_factor: np.ndarray, geom: GKGeometry) -> np.ndarray:
+    vt = right_factor.reshape(geom.nv_tot, geom.nm_tot, geom.params.ns, -1)
+    ext = jnp.pad(vt, ((geom.params.nvb, geom.params.nvb), (0, 0), (0, 0), (0, 0)), mode="constant")
+    dvt = (
+        -ext[geom.params.nvb + 2 : geom.params.nvb + 2 + geom.nv_tot]
+        + 8.0 * ext[geom.params.nvb + 1 : geom.params.nvb + 1 + geom.nv_tot]
+        - 8.0 * ext[geom.params.nvb - 1 : geom.params.nvb - 1 + geom.nv_tot]
+        + ext[geom.params.nvb - 2 : geom.params.nvb - 2 + geom.nv_tot]
+    ) / (12.0 * geom.dv)
+    return dvt.reshape(geom.nvm, -1)
+
+
+def _derivative_z_split_matrices(left_factor: np.ndarray, right_factor: np.ndarray, geom: GKGeometry) -> np.ndarray:
+    ops = _low_rank_operator_cache(geom)
+    right_pos = right_factor * ops["pos_mask"][:, None]
+    right_neg = right_factor * ops["neg_mask"][:, None]
+
+    zeros = jnp.zeros((geom.params.nzb, left_factor.shape[1]), dtype=left_factor.dtype)
+    upper1 = left_factor[-1:, :]
+    upper2 = -left_factor[-2:-1, :] + 2.0 * left_factor[-1:, :]
+    lower1 = left_factor[:1, :]
+    lower2 = -left_factor[1:2, :] + 2.0 * left_factor[:1, :]
+
+    ext_pos = jnp.concatenate((zeros, left_factor, upper1, upper2), axis=0)
+    ext_neg = jnp.concatenate((lower2, lower1, left_factor, zeros), axis=0)
+
+    dleft_pos = (
+        -ext_pos[geom.params.nzb + 2 : geom.params.nzb + 2 + geom.nz_tot]
+        + 8.0 * ext_pos[geom.params.nzb + 1 : geom.params.nzb + 1 + geom.nz_tot]
+        - 8.0 * ext_pos[geom.params.nzb - 1 : geom.params.nzb - 1 + geom.nz_tot]
+        + ext_pos[geom.params.nzb - 2 : geom.params.nzb - 2 + geom.nz_tot]
+    ) / (12.0 * geom.dpara[:, None])
+    dleft_neg = (
+        -ext_neg[geom.params.nzb + 2 : geom.params.nzb + 2 + geom.nz_tot]
+        + 8.0 * ext_neg[geom.params.nzb + 1 : geom.params.nzb + 1 + geom.nz_tot]
+        - 8.0 * ext_neg[geom.params.nzb - 1 : geom.params.nzb - 1 + geom.nz_tot]
+        + ext_neg[geom.params.nzb - 2 : geom.params.nzb - 2 + geom.nz_tot]
+    ) / (12.0 * geom.dpara[:, None])
+    return dleft_pos @ right_pos.T + dleft_neg @ right_neg.T
+
+
+def _collisionless_beta0_fast_path_enabled(geom: GKGeometry) -> bool:
+    return np.isclose(geom.params.beta, 0.0) and np.allclose(geom.params.nu, 0.0)
+
+
+def rhs_h_collisionless_beta0_factors(left_factor: np.ndarray, right_factor: np.ndarray, geom: GKGeometry) -> np.ndarray:
+    ops = _low_rank_operator_cache(geom)
+    pk, _ = solve_fields_from_h_factors(left_factor, right_factor, geom)
+
+    rhs_matrix = jnp.zeros((geom.nz_tot, geom.nvm), dtype=left_factor.dtype)
+
+    rhs_matrix = rhs_matrix + ((-CI * ops["geom_factor"])[:, None] * left_factor) @ (right_factor * ops["kvd_v2_vm"][:, None]).T
+    rhs_matrix = rhs_matrix + ((-CI * ops["geom_factor_omg"])[:, None] * left_factor) @ (right_factor * ops["kvd_mu_vm"][:, None]).T
+
+    dfdz_matrix = _derivative_z_split_matrices(left_factor, right_factor, geom)
+    rhs_matrix = rhs_matrix + dfdz_matrix * ops["stream_vm"][None, :]
+
+    dv_right = _derivative_v_right_factor(right_factor, geom)
+    rhs_matrix = rhs_matrix + (ops["mir_z"][:, None] * left_factor) @ (dv_right * ops["mirror_vm"][:, None]).T
+
+    psi = geom.j0 * pk[:, None, None]
+    dpsidz = _five_point_first_derivative(psi, geom.dpara, axis=0)
+    dpsidz_flat = jnp.broadcast_to(dpsidz[:, None, :, :], (geom.nz_tot, geom.nv_tot, geom.nm_tot, geom.params.ns)).reshape(geom.nz_tot, geom.nvm)
+    source_matrix = pk[:, None] * ops["source_pk_kernel"] + dpsidz_flat * ops["source_dpsi_kernel"]
+    return rhs_matrix + source_matrix
+
+
 def compute_time_step_control(geom: GKGeometry, courant_num: float = 0.5) -> dict[str, float]:
     kvd_max = float(np.max(geom.kvd))
     dt_perp = courant_num * PI / kvd_max
@@ -403,38 +637,25 @@ def compute_time_step_control(geom: GKGeometry, courant_num: float = 0.5) -> dic
 
 
 def _extend_state(field: np.ndarray, geom: GKGeometry) -> np.ndarray:
-    ext = jnp.zeros(
-        (
-            geom.nz_tot + 2 * geom.params.nzb,
-            geom.nv_tot + 2 * geom.params.nvb,
-            geom.nm_tot + 2 * geom.params.nvb,
-            geom.params.ns,
-        ),
-        dtype=field.dtype,
+    base = jnp.pad(
+        field,
+        ((0, 0), (geom.params.nvb, geom.params.nvb), (geom.params.nvb, geom.params.nvb), (0, 0)),
+        mode="constant",
     )
-    z0 = geom.params.nzb
-    v0 = geom.params.nvb
-    m0 = geom.params.nvb
-    ext = _array_set(ext, (slice(z0, z0 + geom.nz_tot), slice(v0, v0 + geom.nv_tot), slice(m0, m0 + geom.nm_tot), slice(None)), field)
 
-    src = slice(m0, m0 + geom.nm_tot)
-    pos_cols = geom.pos_cols
-    neg_cols = geom.neg_cols
-    if pos_cols.size:
-        ext = _array_set(ext, (z0 + geom.nz_tot, pos_cols, src, slice(None)), ext[z0 + geom.nz_tot - 1, pos_cols, src, :])
-        ext = _array_set(
-            ext,
-            (z0 + geom.nz_tot + 1, pos_cols, src, slice(None)),
-            -ext[z0 + geom.nz_tot - 2, pos_cols, src, :] + 2.0 * ext[z0 + geom.nz_tot - 1, pos_cols, src, :],
-        )
-    if neg_cols.size:
-        ext = _array_set(ext, (z0 - 1, neg_cols, src, slice(None)), ext[z0, neg_cols, src, :])
-        ext = _array_set(
-            ext,
-            (z0 - 2, neg_cols, src, slice(None)),
-            -ext[z0 + 1, neg_cols, src, :] + 2.0 * ext[z0, neg_cols, src, :],
-        )
-    return ext
+    vsize = geom.nv_tot + 2 * geom.params.nvb
+    pos_mask = np.zeros(vsize, dtype=bool)
+    neg_mask = np.zeros(vsize, dtype=bool)
+    pos_mask[geom.pos_cols] = True
+    neg_mask[geom.neg_cols] = True
+    pos_mask_arr = _backend_array(pos_mask[None, :, None, None])
+    neg_mask_arr = _backend_array(neg_mask[None, :, None, None])
+
+    upper_1 = jnp.where(pos_mask_arr, base[-1:, :, :, :], 0.0)
+    upper_2 = jnp.where(pos_mask_arr, -base[-2:-1, :, :, :] + 2.0 * base[-1:, :, :, :], 0.0)
+    lower_1 = jnp.where(neg_mask_arr, base[:1, :, :, :], 0.0)
+    lower_2 = jnp.where(neg_mask_arr, -base[1:2, :, :, :] + 2.0 * base[:1, :, :, :], 0.0)
+    return jnp.concatenate((lower_2, lower_1, base, upper_1, upper_2), axis=0)
 
 
 def collision_term(ff_ext: np.ndarray, geom: GKGeometry) -> np.ndarray:
@@ -700,59 +921,65 @@ def _weighted_qr_left(matrix: np.ndarray, weight: float) -> tuple[np.ndarray, np
     return q / np.sqrt(weight), r * np.sqrt(weight)
 
 
-def projector_splitting_step(h_lra: LowRankApprox, dt: float, geom: GKGeometry) -> LowRankApprox:
+def _rk4_integrate(state: np.ndarray, dt: float, rhs_fn) -> np.ndarray:
+    k1 = rhs_fn(state)
+    k2 = rhs_fn(state + 0.5 * dt * k1)
+    k3 = rhs_fn(state + 0.5 * dt * k2)
+    k4 = rhs_fn(state + dt * k3)
+    return state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+def _projector_splitting_step_impl(x_basis: np.ndarray, s_coeff: np.ndarray, v_basis: np.ndarray, dt: float, geom: GKGeometry):
     dvm = geom.vm_weight
     dz = geom.dz
 
-    def full_rhs_from_matrix(matrix: np.ndarray) -> np.ndarray:
-        return flatten_vm(rhs_h(unflatten_vm(matrix, geom), geom))
+    def full_rhs_from_factors(left_factor: np.ndarray, right_factor: np.ndarray) -> np.ndarray:
+        if _collisionless_beta0_fast_path_enabled(geom):
+            return rhs_h_collisionless_beta0_factors(left_factor, right_factor, geom)
+        hk = unflatten_vm(left_factor @ right_factor.T, geom)
+        pk, ak = solve_fields_from_h_factors(left_factor, right_factor, geom)
+        fk = hh_to_ff(hk, ak, geom)
+        return flatten_vm(rhs_h(hk, geom, fk=fk, pk=pk, ak=ak))
 
-    x_basis = h_lra.X.copy()
-    v_basis = h_lra.V.copy()
-    s_coeff = h_lra.S.copy()
+    k_mat0 = x_basis @ s_coeff
 
-    k_mat = x_basis @ s_coeff
+    def rhs_k(k_mat: np.ndarray) -> np.ndarray:
+        rhs_full = full_rhs_from_factors(k_mat, v_basis)
+        return rhs_full @ v_basis * dvm
 
-    def rhs_k(km: np.ndarray) -> np.ndarray:
-        full = km @ v_basis.T
-        rhs_full = full_rhs_from_matrix(full)
-        return rhs_full @ np.conjugate(v_basis) * dvm
+    k_mat = _rk4_integrate(k_mat0, dt, rhs_k)
+    x_new, s_hat = _weighted_qr_left_backend(k_mat, dz)
 
-    k1 = rhs_k(k_mat)
-    k2 = rhs_k(k_mat + 0.5 * dt * k1)
-    k3 = rhs_k(k_mat + 0.5 * dt * k2)
-    k4 = rhs_k(k_mat + dt * k3)
-    k_mat = k_mat + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    def rhs_s(s_mat: np.ndarray) -> np.ndarray:
+        rhs_full = full_rhs_from_factors(x_new @ s_mat, v_basis)
+        return -(jnp.conjugate(x_new).T @ rhs_full @ v_basis) * dz * dvm
 
-    x_new, s_hat = _weighted_qr_left(k_mat, dz)
+    s_tilde = _rk4_integrate(s_hat, dt, rhs_s)
+    l_mat0 = v_basis @ s_tilde.T
 
-    def rhs_s(sm: np.ndarray) -> np.ndarray:
-        full = x_new @ sm @ v_basis.T
-        rhs_full = full_rhs_from_matrix(full)
-        return -(np.conjugate(x_new).T @ rhs_full @ np.conjugate(v_basis)) * dz * dvm
+    def rhs_l(l_mat: np.ndarray) -> np.ndarray:
+        rhs_full = full_rhs_from_factors(x_new, l_mat)
+        return rhs_full.T @ jnp.conjugate(x_new) * dz
 
-    k1 = rhs_s(s_hat)
-    k2 = rhs_s(s_hat + 0.5 * dt * k1)
-    k3 = rhs_s(s_hat + 0.5 * dt * k2)
-    k4 = rhs_s(s_hat + dt * k3)
-    s_tilde = s_hat + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    l_mat = _rk4_integrate(l_mat0, dt, rhs_l)
+    v_new, s_final_t = _weighted_qr_left_backend(l_mat, dvm)
+    return x_new, s_final_t.T, v_new
 
-    l_mat = v_basis @ s_tilde.T
 
-    def rhs_l(lm: np.ndarray) -> np.ndarray:
-        full = x_new @ lm.T
-        rhs_full = full_rhs_from_matrix(full)
-        return rhs_full.T @ np.conjugate(x_new) * dz
+def projector_splitting_step(h_lra: LowRankApprox, dt: float, geom: GKGeometry) -> LowRankApprox:
+    if JAX_AVAILABLE:
+        projector_impl = getattr(geom, "_projector_impl", None)
+        if projector_impl is None:
+            projector_impl = jax.jit(lambda x, s, v, step_dt: _projector_splitting_step_impl(x, s, v, step_dt, geom))
+            setattr(geom, "_projector_impl", projector_impl)
+        x_new, s_new, v_new = projector_impl(h_lra.X, h_lra.S, h_lra.V, dt)
+        h_lra.X = x_new
+        h_lra.S = s_new
+        h_lra.V = v_new
+        return h_lra
 
-    k1 = rhs_l(l_mat)
-    k2 = rhs_l(l_mat + 0.5 * dt * k1)
-    k3 = rhs_l(l_mat + 0.5 * dt * k2)
-    k4 = rhs_l(l_mat + dt * k3)
-    l_mat = l_mat + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-
-    v_new, s_final_t = _weighted_qr_left(l_mat, dvm)
-
-    h_lra.X = x_new
-    h_lra.S = s_final_t.T
-    h_lra.V = v_new
+    x_new, s_new, v_new = _projector_splitting_step_impl(h_lra.X.copy(), h_lra.S.copy(), h_lra.V.copy(), dt, geom)
+    h_lra.X = np.asarray(x_new)
+    h_lra.S = np.asarray(s_new)
+    h_lra.V = np.asarray(v_new)
     return h_lra

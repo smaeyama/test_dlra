@@ -17,6 +17,18 @@ import h5py
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
+import xarray as xr
+
+from linear_gyrokinetic import GKParameters, build_geometry, hh_to_ff, unflatten_vm
+
+
+def _scalar_attr(value, default: float) -> float:
+    if value is None:
+        return float(default)
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return float(default)
+    return float(arr.reshape(-1)[0])
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,16 +50,76 @@ def load_dlra_fkinzv(
     mu_index: int | None,
     species: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
-    with h5py.File(path, "r") as f:
-        time = f["time"][()]
-        z = f["z"][()]
-        vl = f["vl"][()]
-        mu = f["mu"][()]
-        f_real = f["f_real"][()]
-        f_imag = f["f_imag"][()]
+    try:
+        with h5py.File(path, "r") as f:
+            time = f["time"][()]
+            z = f["z"][()]
+            vl = f["vl"][()]
+            mu = f["mu"][()]
+            species_values = f["species"][()]
+            ky = _scalar_attr(f.attrs.get("ky"), 0.2)
+            beta = _scalar_attr(f.attrs.get("beta"), 0.0)
 
-    if species < 0 or species >= f_real.shape[-1]:
-        raise ValueError(f"species must satisfy 0 <= species < {f_real.shape[-1]}")
+            if "f_real" in f and "f_imag" in f:
+                f_real = f["f_real"][()]
+                f_imag = f["f_imag"][()]
+                if species < 0 or species >= f_real.shape[-1]:
+                    raise ValueError(f"species must satisfy 0 <= species < {f_real.shape[-1]}")
+                if mu_index is None:
+                    mu_pos = 0
+                else:
+                    if mu_index < 0 or mu_index >= mu.size:
+                        raise ValueError(f"mu_index must satisfy 0 <= mu_index < {mu.size}")
+                    mu_pos = int(mu_index)
+                f_abs = np.sqrt(f_real[:, :, :, mu_pos, species] ** 2 + f_imag[:, :, :, mu_pos, species] ** 2)
+                return time, z, vl, f_abs, mu_pos
+
+            x_real = f["X_real"][()]
+            x_imag = f["X_imag"][()]
+            s_real = f["S_real"][()]
+            s_imag = f["S_imag"][()]
+            v_real = f["V_real"][()]
+            v_imag = f["V_imag"][()]
+            a_real = f["A_real"][()]
+            a_imag = f["A_imag"][()]
+    except OSError:
+        ds = xr.load_dataset(path)
+        time = ds["time"].values
+        z = ds["z"].values
+        vl = ds["vl"].values
+        mu = ds["mu"].values
+        species_values = ds["species"].values
+        ky = _scalar_attr(ds.attrs.get("ky"), 0.2)
+        beta = _scalar_attr(ds.attrs.get("beta"), 0.0)
+
+        if "f_real" in ds and "f_imag" in ds:
+            f_real = ds["f_real"].values
+            f_imag = ds["f_imag"].values
+            ds.close()
+            if species < 0 or species >= f_real.shape[-1]:
+                raise ValueError(f"species must satisfy 0 <= species < {f_real.shape[-1]}")
+            if mu_index is None:
+                mu_pos = 0
+            else:
+                if mu_index < 0 or mu_index >= mu.size:
+                    raise ValueError(f"mu_index must satisfy 0 <= mu_index < {mu.size}")
+                mu_pos = int(mu_index)
+            f_abs = np.sqrt(f_real[:, :, :, mu_pos, species] ** 2 + f_imag[:, :, :, mu_pos, species] ** 2)
+            return time, z, vl, f_abs, mu_pos
+
+        x_real = ds["X_real"].values
+        x_imag = ds["X_imag"].values
+        s_real = ds["S_real"].values
+        s_imag = ds["S_imag"].values
+        v_real = ds["V_real"].values
+        v_imag = ds["V_imag"].values
+        a_real = ds["A_real"].values
+        a_imag = ds["A_imag"].values
+        ds.close()
+
+    ns = int(species_values.size)
+    if species < 0 or species >= ns:
+        raise ValueError(f"species must satisfy 0 <= species < {ns}")
 
     if mu_index is None:
         mu_pos = 0
@@ -56,7 +128,21 @@ def load_dlra_fkinzv(
             raise ValueError(f"mu_index must satisfy 0 <= mu_index < {mu.size}")
         mu_pos = int(mu_index)
 
-    f_abs = np.sqrt(f_real[:, :, :, mu_pos, species] ** 2 + f_imag[:, :, :, mu_pos, species] ** 2)
+    params = GKParameters(nz=z.size // 2, nv=vl.size // 2, nm=mu.size - 1, ky=ky, beta=beta)
+    geom = build_geometry(params)
+
+    x = x_real + 1j * x_imag
+    s = s_real + 1j * s_imag
+    v = v_real + 1j * v_imag
+    ak = a_real + 1j * a_imag
+
+    ntime = time.size
+    f_abs = np.empty((ntime, z.size, vl.size), dtype=float)
+    for it in range(ntime):
+        h_matrix = x[it] @ s[it] @ v[it].T
+        hk = unflatten_vm(h_matrix, geom)
+        fk = hh_to_ff(hk, ak[it], geom)
+        f_abs[it] = np.abs(np.asarray(fk[:, :, mu_pos, species]))
     return time, z, vl, f_abs, mu_pos
 
 

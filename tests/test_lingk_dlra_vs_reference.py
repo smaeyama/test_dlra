@@ -99,6 +99,18 @@ def _relative_l2(reference: np.ndarray, test: np.ndarray) -> float:
     return float(np.linalg.norm(reference - test) / denom)
 
 
+def _reconstruct_dlra_f(ds_lr: xr.Dataset) -> np.ndarray:
+    x = parts_to_complex(ds_lr["X_real"].values, ds_lr["X_imag"].values)
+    s = parts_to_complex(ds_lr["S_real"].values, ds_lr["S_imag"].values)
+    v = parts_to_complex(ds_lr["V_real"].values, ds_lr["V_imag"].values)
+    f_full = np.einsum("tzr,trq,tvq->tzv", x, s, v, optimize=True)
+    nz = ds_lr["z"].size
+    nv = ds_lr["vl"].size
+    nm = ds_lr["mu"].size
+    ns = ds_lr["species"].size
+    return f_full.reshape(f_full.shape[0], nz, nv, nm, ns)
+
+
 def test_lingk_dlra_tracks_reference_distribution(generated_lingk_datasets: tuple[Path, Path, Path]) -> None:
     fkinzv_file, mominz_file, simulation_file = generated_lingk_datasets
     ds_fkinzv = xr.load_dataset(fkinzv_file)
@@ -106,7 +118,7 @@ def test_lingk_dlra_tracks_reference_distribution(generated_lingk_datasets: tupl
     ds_lr = xr.load_dataset(simulation_file)
 
     f_ref = parts_to_complex(ds_fkinzv["f_real"].values, ds_fkinzv["f_imag"].values)
-    f_lr_full = parts_to_complex(ds_lr["f_real"].values, ds_lr["f_imag"].values)
+    f_lr_full = _reconstruct_dlra_f(ds_lr)
     mu_index = int(ds_fkinzv["mu_index"].values[0])
     f_lr = f_lr_full[:, :, :, mu_index, :][:, None, ...]
 

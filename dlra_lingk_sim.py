@@ -17,13 +17,12 @@ from linear_gyrokinetic import (
     GKParameters,
     build_geometry,
     complex_to_parts,
-    compute_density_moment,
     compute_time_step_control,
+    compute_density_moment_from_h_factors,
     flatten_vm,
     init_state,
     projector_splitting_step,
-    state_fields_from_h,
-    unflatten_vm,
+    solve_fields_from_h_factors,
     weighted_gram,
 )
 from low_rank_approx import LowRankApprox
@@ -134,15 +133,14 @@ def main() -> None:
     phi_series: list[np.ndarray] = []
     a_series: list[np.ndarray] = []
     dens_series: list[np.ndarray] = []
-    f_series: list[np.ndarray] = []
 
     time = 0.0
     time_out = time + params.dt_out - EPS
 
     def record_state(current_time: float) -> None:
-        hk_full = unflatten_vm(h_lra.to_full(), geom)
-        fk_full, pk_full, ak_full = state_fields_from_h(hk_full, geom)
-        density = compute_density_moment(fk_full, geom)
+        left_factor = h_lra.X @ h_lra.S
+        pk_full, ak_full = solve_fields_from_h_factors(left_factor, h_lra.V, geom)
+        density = compute_density_moment_from_h_factors(left_factor, h_lra.V, ak_full, geom)
 
         times.append(float(current_time))
         X_series.append(np.asarray(h_lra.X))
@@ -153,7 +151,6 @@ def main() -> None:
         phi_series.append(np.asarray(pk_full))
         a_series.append(np.asarray(ak_full))
         dens_series.append(np.asarray(density))
-        f_series.append(np.asarray(fk_full))
 
     sample_start = perf_counter()
     record_state(time)
@@ -191,7 +188,6 @@ def main() -> None:
     phi_arr = np.asarray(phi_series)
     a_arr = np.asarray(a_series)
     dens_arr = np.asarray(dens_series)
-    f_arr = np.asarray(f_series)
 
     X_real, X_imag = complex_to_parts(X_arr)
     S_real, S_imag = complex_to_parts(S_arr)
@@ -201,7 +197,6 @@ def main() -> None:
     phi_real, phi_imag = complex_to_parts(phi_arr)
     a_real, a_imag = complex_to_parts(a_arr)
     dens_real, dens_imag = complex_to_parts(dens_arr)
-    f_real, f_imag = complex_to_parts(f_arr)
 
     out_start = perf_counter()
     ds = xr.Dataset(
@@ -222,8 +217,6 @@ def main() -> None:
             "A_imag": (("time", "z"), a_imag),
             "dens_real": (("time", "z", "species"), dens_real),
             "dens_imag": (("time", "z", "species"), dens_imag),
-            "f_real": (("time", "z", "vl", "mu", "species"), f_real),
-            "f_imag": (("time", "z", "vl", "mu", "species"), f_imag),
         },
         coords={
             "time": times_arr,
@@ -245,6 +238,9 @@ def main() -> None:
             "seed": params.seed,
             "ky": params.ky,
             "beta": params.beta,
+            "nz": params.nz,
+            "nv": params.nv,
+            "nm": params.nm,
         },
     )
     out_path = Path(args.out)
