@@ -6,6 +6,9 @@ Dynamic Low-Rank Approximation (DLRA) test project for 1D electrostatic Vlasov-P
 
 - `reference_Vlasov_sim.py` - creates the initial condition and a reference Vlasov simulation in NetCDF format
 - `dlra_Vlasov_sim.py` - runs the DLRA simulation from the initial NetCDF file
+- `linear_gyrokinetic.py` - shared geometry, operators, field solves, and DLRA utilities for the linear gyrokinetic example
+- `reference_lingk_sim.py` - full-grid reference solver mirroring the `test_lingk` linear gyrokinetic setup and writing `fkinzv`/`mominzt`/`frq`-style outputs
+- `dlra_lingk_sim.py` - DLRA solver for the linear gyrokinetic problem using `h(z,vm) = X(z) S V(vm)^T`
 - `plot_figure.py` - visualizes the reference and DLRA results side by side
 - `low_rank_approx.py` - low-rank factor class (`X`, `S`, `V`) shared by the DLRA and plotting scripts
 - `tests/test_dlra_vs_reference.py` - runs short reference/DLRA simulations and validates reconstruction accuracy
@@ -50,6 +53,26 @@ You can switch to visualize the perturbed distribution function subtracted the e
 ```bash
 python plot_figure.py --reference reference_result.nc --sim simulation_result.nc --plot-mode fluctuation
 ```
+
+## Linear Gyrokinetic Example
+
+The repository also includes a Python port of the `test_lingk/src` linear gyrokinetic solver.
+The DLRA version uses a matrix factorization over parallel position and a flattened velocity-magnetic coordinate:
+
+`h(t, z, vm) = X(t, z) S(t) V(t, vm)^T`, where `vm = (v_parallel, mu, species)`.
+
+Small reference and DLRA runs can be generated with:
+
+```bash
+python reference_lingk_sim.py --output-dir lingk_output --nz 120 --nv 32 --nm 31 --dt 0.01 --dt-out 0.1 --time-limit 10.0
+python dlra_lingk_sim.py --out lingk_dlra.nc --rank 8 --nz 24 --nv 8 --nm 7 --dt 0.01 --nt 41 --nskip 10
+```
+
+`reference_lingk_sim.py` writes:
+
+- `fkinzv.nc` - snapshots of `f(z, v_parallel)` at selected `mu` indices
+- `mominzt.nc` - `phi(z)`, `A_parallel(z)`, and density moments
+- `frq.txt` - growth-rate/frequency estimates in the style of the original Fortran output
 
 Each stage exchanges data through NetCDF (`.nc`) files that can be read with `xarray`.
 The DLRA simulation stores the low-rank factors `X(time,x,rank)`, `S(time,rank,rank)`, and `V(time,v,rank)` instead of the full `f(x,v)` field.

@@ -9,13 +9,14 @@ import numpy as np
 
 
 class LowRankApprox:
-    def __init__(self, nx: int, nv: int, nr: int):
+    def __init__(self, nx: int, nv: int, nr: int, dtype=np.float64):
         self.nx = nx
         self.nv = nv
         self.nr = nr
-        self.X = np.zeros((nx, nr))
-        self.S = np.zeros((nr, nr))
-        self.V = np.zeros((nv, nr))
+        self.dtype = np.dtype(dtype)
+        self.X = np.zeros((nx, nr), dtype=self.dtype)
+        self.S = np.zeros((nr, nr), dtype=self.dtype)
+        self.V = np.zeros((nv, nr), dtype=self.dtype)
 
     def init_from_full(self, f_xv: np.ndarray, dx: float, dv: float):
         U, s, Vt = np.linalg.svd(f_xv, full_matrices=False)
